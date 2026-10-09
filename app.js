@@ -160,11 +160,82 @@
 
   function fmtDateNum(n) { var s = String(n); return s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8); }
 
-  // 「昨日封板率」来源：仓库内的 data/*.json（由 GitHub Actions 采集时写入）。
-  // 注：data.10jqka.com.cn 的 CORS 响应头依赖 Referer，浏览器跨站 fetch 会被拒，
-  //     所以前端不直连该接口，只读同域名下的静态 JSON。
-  async function resolveRate(dateNum) {
-    var ds = fmtDateNum(String(dateNum));
+  /* ---- 「昨日封板率」基准 ----
+   * 首选：直连同花顺涨停池 / 炸板池自己算（实测该接口会把请求的 Origin 原样回显
+   *       到 Access-Control-Allow-Origin，所以浏览器可跨域直连，不依赖任何服务端任务）。
+   * 兜底：读仓库内的 data/*.json 存档（GitHub Actions 采集写入）。
+   * 基准是「日频」常量，按数据日期缓存，60 秒刷新不会重复请求。
+   */
+  var POOL_FIELDS = '199112,9001,330323,330324,330325,9002,330329,133971,133970,' +
+    '1968584,3475914,9003,9004,3475915,3475916,330326,330327,330328';
+  var rateCache = {};
+
+  // 带超时的 fetch：某些网络环境下该域名会「挂住」而不是立刻报错，必须主动掐断，
+  // 否则会把整轮刷新拖死。取不到就走存档兜底。
+  async function fetchWithTimeout(url, ms) {
+    var ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = null;
+    if (ctl) timer = setTimeout(function () { ctl.abort(); }, ms || 8000);
+    try {
+      return await fetch(url, ctl ? { signal: ctl.signal, cache: 'no-store' } : { cache: 'no-store' });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function fetchPool(api, dateNum) {
+    var url = 'https://data.10jqka.com.cn/dataapi/limit_up/' + api +
+      '?page=1&limit=200&field=' + POOL_FIELDS +
+      '&filter=HS,GEM2STAR&order_field=330324&order_type=0&date=' + dateNum;
+    var r = await fetchWithTimeout(url, 8000);
+    if (!r.ok) throw new Error('涨停池 HTTP ' + r.status);
+    var j = await r.json();
+    return (j && j.data) ? j.data : null;
+  }
+
+  // 用同花顺池子的家数算出两种口径的封板率
+  function buildRate(dateNum, zt, zb) {
+    var A = (zt && zt.page) ? zt.page.total : 0;
+    if (!A) return null;
+    var Z = (zb && zb.page) ? zb.page.total : 0;
+    var oneWord = 0;
+    ((zt.info) || []).forEach(function (x) { if (x.limit_up_type === '一字板') oneWord++; });
+    var base = A - oneWord;                       // 非一字板涨停家数
+    var d0 = A + Z, d1 = base + Z;
+    return {
+      date: String(dateNum), zt: A, zb: Z, oneWord: oneWord, base: base,
+      rate: d0 > 0 ? +(A / d0 * 100).toFixed(4) : null,       // 总封板率（指数①）
+      fbl: d1 > 0 ? +(base / d1 * 100).toFixed(4) : null,     // 非一字板封板率（指数②）
+      zbl: d1 > 0 ? +(Z / d1 * 100).toFixed(4) : null,
+      src: 'live'
+    };
+  }
+
+  // dataDate = 当前这批分时所属的交易日；基准取它前面「最近一个有数据的交易日」
+  var liveRateFailUntil = 0;      // 直连不可用时退避，避免每轮刷新都白等超时
+  async function resolveRateLive(dataDate) {
+    if (Date.now() < liveRateFailUntil) return null;
+    var n = parseInt(dataDate, 10);
+    if (!isFinite(n)) return null;
+    try {
+      for (var back = 1; back <= 12; back++) {
+        var prev = shiftYmd(n, -back);
+        var zt = await fetchPool('limit_up_pool', prev);
+        if (!zt || !zt.page || !zt.page.total) continue;
+        var zb = null;
+        try { zb = await fetchPool('open_limit_pool', prev); } catch (e) { zb = null; }
+        var rr = buildRate(prev, zt, zb);
+        if (rr && rr.rate != null && rr.fbl != null) return rr;
+      }
+      return null;                                  // 接口通但无数据，不算故障
+    } catch (e) {
+      liveRateFailUntil = Date.now() + 10 * 60 * 1000;
+      return null;
+    }
+  }
+
+  async function resolveRateArchive(dateNum) {
+    var ds = fmtDateNum(String(dateNum || ''));
     try {
       var r = await fetch('data/' + ds + '.json?_=' + Date.now());
       if (r.ok) {
@@ -179,6 +250,16 @@
         if (d2 && d2.rate && d2.rate.rate) return d2.rate;
       }
     } catch (e) { /* 忽略 */ }
+    return null;
+  }
+
+  async function resolveRate(dateNum) {
+    var key = String(dateNum || '');
+    if (key && rateCache[key]) return rateCache[key];
+    var live = await resolveRateLive(key);
+    if (live) { if (key) rateCache[key] = live; return live; }
+    var arch = await resolveRateArchive(key);
+    if (arch) { if (key) rateCache[key] = arch; return arch; }
     return null;
   }
 
@@ -634,10 +715,12 @@
       try { days = await loadHistory(); } catch (e) { days = []; }
       state.days = days;
 
-      var rows = [], rate = null, dataDate = null;
+      var rows = [], rate = null, dataDate = null, archived = false;
 
-      if (inSession(now)) {
-        // ---- 盘中：直连同花顺实时分时，逐分钟现算 ----
+      // ---- 直连同花顺分时（盘中 / 盘后都用它）----
+      // 关键点：盘后该接口返回的是当日「完整」分时，末点即收盘值，所以收盘后也能直接算出收盘结果，
+      // 不再依赖仓库里的当日存档（存档可能因 GitHub 定时任务未触发而缺半天，之前就是这样显示错的）。
+      try {
         var aPack = await getTimeSeries('a', '48', '883900');
         await sleep(160);
         var bPack = await getTimeSeries('b', 'hs', '1A0001');
@@ -657,12 +740,14 @@
           rows.push({ t: x.t, pct: x.pct, bPct: b, cPct: (cMap[x.t] == null ? null : cMap[x.t]) });
         });
         dataDate = aPack.date ? String(aPack.date) : null;
-        rate = await resolveRate(dataDate);
-        if (!rate && days.length) rate = days[days.length - 1].rate;
+      } catch (e) {
+        rows = [];
+      }
 
-      } else {
-        // ---- 非交易时段：同花顺会把 date 标成今天但给的是上一交易日数据，
-        //      直接改用仓库里最近一个交易日的存档，保证 曲线 / 封板率 同日 ----
+      if (rows.length) rate = await resolveRate(dataDate);
+
+      // ---- 兜底：直连失败时退回仓库里最近一个交易日的存档 ----
+      if (!rows.length) {
         var lastDay = days.length ? days[days.length - 1] : null;
         if (lastDay) {
           rate = lastDay.rate;
@@ -670,18 +755,22 @@
           rows = (lastDay.points || []).map(function (p) {
             return { t: p.t, pct: p.a, bPct: p.b, cPct: (p.c == null ? null : p.c) };
           });
+          archived = true;
         }
       }
+      if (!rate && days.length) rate = days[days.length - 1].rate;
 
       // ---- 渲染 ----
       state.rows = rows;
       state.rate = rate;
 
       if (rate) {
-        setText('rateText', rate.rate.toFixed(2) + '%（' + rate.zt + '/' + (rate.zt + rate.zb) + '，基准日 ' + rate.date + '）');
+        var tag = rate.src === 'live' ? '' : '［存档］';
+        setText('rateText', rate.rate.toFixed(2) + '%（' + rate.zt + '/' + (rate.zt + rate.zb) +
+          '，基准日 ' + rate.date + '）' + tag);
         setText('fblText', rate.fbl == null ? '--' :
           rate.fbl.toFixed(2) + '%（' + rate.base + '/' + (rate.base + rate.zb) +
-          '，剔除一字板 ' + rate.oneWord + ' 家，炸板率 ' + rate.zbl.toFixed(2) + '%）');
+          '，剔除一字板 ' + rate.oneWord + ' 家，炸板率 ' + rate.zbl.toFixed(2) + '%）' + tag);
       } else {
         setText('rateText', '未取到');
         setText('fblText', '未取到');
@@ -743,7 +832,8 @@
       }
 
       if (dot) dot.className = 'dot on';
-      setText('liveText', inSession(now) ? '已连接 · 盘中实时刷新' : '已连接 · 显示最近交易日');
+      setText('liveText', (inSession(now) ? '已连接 · 盘中实时刷新' : '已连接 · 已收盘（当日完整分时）') +
+        (archived ? '　[分时取数失败，暂用存档]' : ''));
 
     } catch (e) {
       if (dot) dot.className = 'dot err';

@@ -1,33 +1,37 @@
 name: collect-sentiment
 
-# 交易日盘中每分钟采集一次「涨停情绪指数」的三个输入量，写入 data/ 并自动提交。
-# cron 用 UTC；北京时间 = UTC+8，中国无夏令时，故固定为 09:25 / 12:55。
+# 每个交易日收盘后抓一次「全天完整分时」写入 data/，供 5 日图与存档兜底使用。
+#
+# 为什么改成「收盘后一次抓全天」而不是「盘中逐分钟轮询」：
+#   同花顺的 v6/time 分时接口在盘后仍会返回当日完整的 241 个点，所以只要在收盘后成功跑一次，
+#   全天数据就齐了。这比依赖 9 轮 × 14 分钟的轮询可靠得多 —— 之前那版实测 cron 一次都没触发
+#   （GitHub 的 scheduled workflow 对新仓库 / 低活跃仓库经常丢调度），当天只存到上午半天。
+#   页面本身盘中、盘后都直连分时接口现算，不依赖这里的存档。
+#
+# cron 用 UTC；北京时间 = UTC+8，中国无夏令时。
 on:
   schedule:
-    - cron: '25 1 * * 1-5'    # 北京 09:25（早盘，采到 11:30）
-    - cron: '55 4 * * 1-5'    # 北京 12:55（午盘，采到 15:00）
-  workflow_dispatch:          # 支持手动触发，便于验证
+    - cron: '10 7 * * 1-5'    # 北京 15:10（收盘后 10 分钟）
+    - cron: '40 7 * * 1-5'    # 北京 15:40（冗余重跑，同日幂等）
+    - cron: '10 8 * * 1-5'    # 北京 16:10（再兜一次）
+  workflow_dispatch:
     inputs:
       probe:
         description: '仅做连通性探测（只读不写），用于确认同花顺接口对 GitHub 出口 IP 是否放行'
         type: boolean
         default: false
-      minutes:
-        description: '手动模式：每轮采集分钟数（留空 = 14）。填较小的值可快速验证「采集→提交」链路'
-        type: string
-        default: ''
 
 permissions:
   contents: write             # 允许把 data/ 提交回仓库
 
 concurrency:
   group: collect-sentiment
-  cancel-in-progress: false   # 两段 cron 串行，避免午盘把早盘任务中断
+  cancel-in-progress: false
 
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 150      # 9 轮 × 14 分钟 ≈ 126 分钟，留出余量
+    timeout-minutes: 20
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -44,49 +48,30 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # 手动触发 + 勾选 probe：只探测三个接口能否连通，不写任何数据
       - name: 连通性探测（手动触发专用）
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.probe == 'true' }}
         run: node scripts/collect.js --probe
 
-      - name: 分段采集并提交
+      - name: 抓取当日完整分时并提交
         if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.probe == 'true') }}
-        env:
-          # 定时触发时由 cron 表达式判定时段；手动触发时为 auto（脚本按当前北京时间自动落 am/pm）
-          SESSION: ${{ github.event.schedule == '55 4 * * 1-5' && 'pm' || (github.event.schedule == '25 1 * * 1-5' && 'am' || 'auto') }}
-          # 手动模式可缩短每轮时长；留空或定时触发时用默认 14 分钟
-          MIN_PER_ROUND: ${{ github.event.inputs.minutes || '14' }}
         run: |
           set -u
-          echo "session = $SESSION   minutes/round = $MIN_PER_ROUND"
+          echo "北京时间 $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M')"
 
-          commit_if_any() {
-            git add data/ || true
-            if git diff --staged --quiet; then
-              echo "  本轮无新增数据"
-              return 0
-            fi
-            git commit -m "data: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M') 采集" || true
-            # 用 HEAD:main 推送，避免 checkout 处于 detached HEAD 时推不出去
-            if git push origin HEAD:main; then return 0; fi
-            echo "  push 被拒，尝试 rebase 后重试"
-            # 先清掉可能残留的 rebase 状态，否则工作区会带冲突标记，下一轮 JSON 解析会失败
+          node scripts/collect.js --full
+
+          git add data/ || true
+          if git diff --staged --quiet; then
+            echo "  无数据变化（同日重跑幂等）"
+            exit 0
+          fi
+          git commit -m "data: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M') 全天分时" || true
+          if git push origin HEAD:main; then exit 0; fi
+          echo "  push 被拒，尝试 rebase 后重试"
+          git rebase --abort 2>/dev/null || true
+          if ! git pull --rebase --autostash origin main; then
             git rebase --abort 2>/dev/null || true
-            if ! git pull --rebase --autostash origin main; then
-              git rebase --abort 2>/dev/null || true
-              echo "  !! rebase 冲突，本轮放弃（数据留在本地提交，下一轮重试）"
-              return 0
-            fi
-            git push origin HEAD:main || echo "  !! push 仍失败，下一轮重试"
-          }
-
-          # 定时任务跑 9 轮 × 14 分钟 ≈ 126 分钟（覆盖一个完整半场）；
-          # 手动模式只跑 1 轮，便于快速验证。
-          if [ "$MIN_PER_ROUND" = "14" ]; then ROUNDS=9; else ROUNDS=1; fi
-          echo "rounds = $ROUNDS"
-
-          for i in $(seq 1 "$ROUNDS"); do
-            echo "--- 第 $i/$ROUNDS 轮 ---"
-            node scripts/collect.js --session="$SESSION" --minutes="$MIN_PER_ROUND" || true
-            commit_if_any
-          done
+            echo "  !! rebase 冲突，本轮放弃"
+            exit 0
+          fi
+          git push origin HEAD:main || echo "  !! push 仍失败"

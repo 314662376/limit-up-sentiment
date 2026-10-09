@@ -24,9 +24,10 @@
  *   4) 上证指数(hs_1A0001) → 实时涨跌幅(%)                                     → ①
  *
  * 用法：
- *   node scripts/collect.js --session=am      # 上午 9:30-11:30 每分钟采集
- *   node scripts/collect.js --session=pm      # 下午 13:00-15:00 每分钟采集
- *   node scripts/collect.js --once            # 只采一次（本地测试）
+ *   node scripts/collect.js --full        # 【推荐】抓当日完整分时，一次写入全天 241 个点（盘后跑）
+ *   node scripts/collect.js --session=am  # 上午 9:30-11:30 逐分钟采集（旧模式）
+ *   node scripts/collect.js --session=pm  # 下午 13:00-15:00 逐分钟采集（旧模式）
+ *   node scripts/collect.js --once        # 只采一次（本地测试）
  */
 
 const fs = require('fs');
@@ -41,6 +42,7 @@ const args = process.argv.slice(2);
 // --session 可传 am / pm / auto（默认 auto：按当前北京时间自动判断，供 workflow_dispatch 手动触发用）
 const SESSION_ARG = (args.find(function (a) { return a.indexOf('--session=') === 0; }) || '--session=auto').split('=')[1];
 const ONCE = args.indexOf('--once') >= 0;
+const FULL = args.indexOf('--full') >= 0;     // 抓当日完整分时，一次写满全天（推荐，盘后跑）
 const PROBE = args.indexOf('--probe') >= 0;   // 只读探测：验证三个接口是否可达，不写任何文件
 const minutesArg = args.find(function (a) { return a.indexOf('--minutes=') === 0; });
 const MINUTES = minutesArg ? parseInt(minutesArg.split('=')[1], 10) : 0;   // >0 时跑满 N 分钟即退出（供 CI 分批提交）
@@ -131,6 +133,28 @@ async function getPoolStats(kind, dateNum) {
 }
 
 /* ---------------- 业务 ---------------- */
+// 同花顺当日完整分时（JSONP）→ { date, pre, map:{ 'HH:MM': 涨跌幅% } }
+// 收盘后调用即可一次拿到全天 241 个点，比逐分钟轮询可靠得多。
+async function getTimeSeries(prefix, code) {
+  const text = await fetchText('https://d.10jqka.com.cn/v6/time/' + prefix + '_' + code + '/last.js');
+  const m = text.match(/\(([\s\S]*)\)\s*;?\s*$/);
+  if (!m) throw new Error('bad jsonp');
+  const d = JSON.parse(m[1]);
+  const p = d[prefix + '_' + code];
+  if (!p || !p.data) throw new Error('no time data ' + code);
+  const pre = parseFloat(p.pre);
+  const map = {};
+  p.data.split(';').forEach(function (r) {
+    const x = r.split(',');
+    if (x.length < 2 || !x[1]) return;
+    const price = parseFloat(x[1]);
+    if (!isFinite(price)) return;
+    const t = String(x[0]);
+    map[t.slice(0, 2) + ':' + t.slice(2)] = pre > 0 ? (price / pre - 1) * 100 : null;
+  });
+  return { date: String(p.date || ''), pre: pre, map: map, n: Object.keys(map).length };
+}
+
 // 找「最近一个有数据的交易日」的封板率 / 非一字板封板率
 async function resolveRate(baseYmd) {
   for (let back = 1; back <= 12; back++) {
@@ -208,6 +232,44 @@ async function sampleOnce(rateInfo) {
   };
 }
 
+// 【推荐路径】一次抓取「当日完整分时」并落盘。
+// 与逐分钟轮询相比：只需一个成功的时间点（例如收盘后 15:10），就能把全天 241 个点补齐，
+// 因此即使 GitHub 的 cron 一次都没触发，只要手动/定时跑过一次 --full 数据就是完整的。
+async function collectFullDay() {
+  const aP = await retry(function () { return getTimeSeries('48', '883900'); }, 2);
+  await sleep(300);
+  const bP = await retry(function () { return getTimeSeries('hs', '1A0001'); }, 2);
+  await sleep(300);
+  let cP = null;
+  try { cP = await retry(function () { return getTimeSeries('48', '883918'); }, 2); } catch (e) { cP = null; }
+
+  if (!aP.date || !aP.n) throw new Error('883900 分时为空');
+  const dataStr = aP.date.slice(0, 4) + '-' + aP.date.slice(4, 6) + '-' + aP.date.slice(6, 8);
+  const rateInfo = await resolveRate(parseInt(aP.date, 10));
+  if (!rateInfo) throw new Error('未能取得基准日封板率');
+
+  const pts = [];
+  Object.keys(aP.map).sort().forEach(function (t) {
+    const a = aP.map[t], b = bP.map[t];
+    if (a == null || b == null) return;
+    const c = cP ? cP.map[t] : null;
+    const v = computeValue(rateInfo.rate, a, b);
+    const v2 = (c == null || rateInfo.fbl == null) ? null : computeBoardReturn(c, a, rateInfo.fbl);
+    pts.push({
+      t: t, v: +v.toFixed(4), v2: v2 == null ? null : +v2.toFixed(2),
+      a: +a.toFixed(3), b: +b.toFixed(3), c: c == null ? null : +c.toFixed(3)
+    });
+  });
+  if (!pts.length) throw new Error('无可写入的点');
+
+  const store = { date: dataStr, rate: rateInfo, points: pts, source: 'full' };
+  writeStore(dataStr, store);
+  fs.writeFileSync(path.join(DATA_DIR, 'latest.json'), JSON.stringify({
+    date: dataStr, rate: rateInfo, updated: new Date().toISOString()
+  }, null, 1));
+  return store;
+}
+
 async function main() {
   const now = bjNow();
   const todayNum = ymdNum(now);
@@ -253,6 +315,15 @@ async function main() {
     }
     console.log('[probe] 结束：' + ok + '/' + checks.length + ' 项可用');
     process.exit(ok === checks.length ? 0 : 1);
+  }
+
+  // 【推荐】一次写满全天：只需在收盘后跑一次，就能补齐当日 241 个点
+  if (FULL) {
+    const store = await collectFullDay();
+    console.log('[collect] 全量落盘 ' + store.date + '：' + store.points.length + ' 个点，' +
+      '基准日 ' + store.rate.date + '（非一字板封板率 ' + store.rate.fbl.toFixed(2) + '%）');
+    console.log('[collect] 末点 ' + JSON.stringify(store.points[store.points.length - 1]));
+    return;
   }
 
   const rateInfo = await resolveRate(todayNum);
