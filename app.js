@@ -5,24 +5,37 @@
    * 两个指数
    *  ① 涨停情绪指数（无量纲，1.000 = 中性）
    *     值 = 昨日封板率/100 × (883900涨跌幅% ÷ 100) + 1 + 上证涨跌幅% ÷ 20
-   *     Excel 式 =C3/100*D3+1+E3/20          → y 轴固定 0.95 ~ 1.05
+   *     Excel 式 =C3/100*D3+1+E3/20          → y 轴固定 0.925 ~ 1.075
+   *                                             （跌破 0.95 的线段标红、涨破 1.05 的标绿）
    *
    *  ② 打板收益（元 / 万元本金，0 = 不赚不亏）
    *     值 = 10000*(1+883918%)*昨日炸板率 + 10000*(1+883900%)*昨日非一字板封板率 − 10000
    *     Excel 式 =10000*(1+F2)*E2+10000*(1+D2)*C2-10000
    *     条件：昨日非一字板封板率(C) + 昨日炸板率(E) = 100%，故等价于
    *     值 = 100 × ( 883918% × 炸板率 + 883900% × 非一字板封板率 )
-   *     → y 轴固定 −100 ~ 200
+   *     → y 轴固定 −200 ~ 300
+   *       （跌破 −100 的线段标红、涨破 200 的标绿）
    * ============================================================ */
   var BASE = 'https://d.10jqka.com.cn';
   var REFRESH_SEC = 60;
   var DAYS_5D = 5;
-  var COLORS = ['#2f6bd8', '#d93025', '#0f9d58', '#e08a1e', '#7b61c9'];
+  // 5 日图「每天一色」的调色板：刻意避开纯红 / 纯绿，
+  // 因为红=跌破下阈、绿=涨破上阈，日期色不该和警示色抢同一套语义。
+  var COLORS = ['#2f6bd8', '#7b61c9', '#0d8ba6', '#c08a2e', '#6b7a8f'];
 
-  // 指数①：y 轴固定区间
-  var Y_MIN = 0.95, Y_MAX = 1.05, Y_STEP = 0.025, Y_BASE = 1;
-  // 指数②：y 轴固定区间
-  var Y2_MIN = -100, Y2_MAX = 200, Y2_STEP = 50, Y2_BASE = 0;
+  // 指数①：y 轴固定区间（0.925 ~ 1.075，7 条刻度，0.95 / 1.05 刚好落在刻度上）
+  var Y_MIN = 0.925, Y_MAX = 1.075, Y_STEP = 0.025, Y_BASE = 1;
+  // 指数②：y 轴固定区间（-200 ~ 300，6 条刻度，-100 / 200 刚好落在刻度上）
+  var Y2_MIN = -200, Y2_MAX = 300, Y2_STEP = 100, Y2_BASE = 0;
+
+  /* 超阈区间警示色：跌破下阈 = 红，涨破上阈 = 绿（沿用 A 股「红跌绿涨」之外的
+   * 「危险 = 红 / 安全 = 绿」语义，两处阈值由用户指定）
+   *   ① 区间 0.95 ~ 1.05（中性基准 1.000）
+   *   ② 区间 -100 ~ 200（中性基准 0）        */
+  var TH1_LO = 0.95, TH1_HI = 1.05;
+  var TH2_LO = -100, TH2_HI = 200;
+  var C_RED = '#d93025', C_GREEN = '#0f9d58';
+  var C_BASE = '#8b929c';            // 中性基准线（灰）
 
   var charts = {};
   var left = REFRESH_SEC;
@@ -329,12 +342,57 @@
     };
   }
 
-  function badgeLine(y, label) {
+  // 多条横线：中性基准（灰）+ 下阈（红）+ 上阈（绿）
+  function badgeLines(items) {
     return {
       silent: true, symbol: 'none',
-      lineStyle: { color: '#d93025', type: 'dashed', width: 1, opacity: .55 },
-      label: { show: true, position: 'insideEndTop', formatter: label, color: '#d93025', fontSize: 10 },
-      data: [{ yAxis: y }]
+      data: items.map(function (it) {
+        return {
+          yAxis: it.y,
+          lineStyle: {
+            color: it.color, type: 'dashed',
+            width: it.width || 1, opacity: it.opacity == null ? .6 : it.opacity
+          },
+          label: {
+            // 靠右放置：左端会被 y 轴刻度标签压住
+            show: true, position: 'insideEndTop',
+            formatter: it.label, color: it.color, fontSize: 10
+          }
+        };
+      })
+    };
+  }
+
+  // 背景警示带：下阈以下淡红、上阈以上淡绿（silent，不挡 tooltip）
+  function dangerZones(yMin, yMax, lo, hi) {
+    var d = [];
+    if (lo > yMin) {
+      d.push([
+        { yAxis: yMin, itemStyle: { color: 'rgba(217,48,37,.075)' } },
+        { yAxis: lo }
+      ]);
+    }
+    if (hi < yMax) {
+      d.push([
+        { yAxis: hi, itemStyle: { color: 'rgba(15,157,88,.075)' } },
+        { yAxis: yMax }
+      ]);
+    }
+    return { silent: true, data: d };
+  }
+
+  // 按 y 值分段着色（< 下阈 红 / 区间内 本色 / > 上阈 绿）
+  function zoneVisualMap(dim, lo, hi, midColor, seriesIndex) {
+    return {
+      type: 'piecewise',
+      show: false,
+      dimension: dim,
+      seriesIndex: seriesIndex == null ? 0 : seriesIndex,
+      pieces: [
+        { lt: lo, color: C_RED },
+        { gte: lo, lte: hi, color: midColor },
+        { gt: hi, color: C_GREEN }
+      ]
     };
   }
 
@@ -392,11 +450,18 @@
       },
       xAxis: baseXAxis(DAY_TICKS, true),
       yAxis: baseYAxis(Y_MIN, Y_MAX, Y_STEP, 3),
+      visualMap: zoneVisualMap(1, TH1_LO, TH1_HI, '#2f6bd8'),
       series: [{
         type: 'line', data: data, symbol: 'none', smooth: false,
-        lineStyle: { width: 1.7, color: '#2f6bd8' },
+        // 注意：这里不能写死 lineStyle.color，否则会盖掉 visualMap 的分段染色
+        lineStyle: { width: 1.7 },
         areaStyle: areaFill('47,107,216'),
-        markLine: badgeLine(Y_BASE, '1.000')
+        markArea: dangerZones(Y_MIN, Y_MAX, TH1_LO, TH1_HI),
+        markLine: badgeLines([
+          { y: Y_BASE, label: '1.000', color: C_BASE },
+          { y: TH1_LO, label: TH1_LO.toFixed(3), color: C_RED },
+          { y: TH1_HI, label: TH1_HI.toFixed(3), color: C_GREEN }
+        ])
       }]
     }, true);
 
@@ -425,7 +490,7 @@
       });
       // 初期某天可能只有 1-2 个点：此时连线画不出来，至少把点标出来，避免「图例有、图上没有」
       var few = pts.length < 2;
-      series.push({
+      var s = {
         name: day.date,
         type: 'line',
         data: pts,
@@ -435,7 +500,18 @@
         smooth: false,
         lineStyle: { width: 1.5, color: color },
         itemStyle: { color: color }
-      });
+      };
+      // 5 日图靠颜色区分「哪一天」，所以不按阈值改线色，
+      // 只用背景警示带 + 阈值虚线表达「跌破 / 涨破」——挂在第一条线上，避免重复渲染。
+      if (!series.length) {
+        s.markArea = dangerZones(Y_MIN, Y_MAX, TH1_LO, TH1_HI);
+        s.markLine = badgeLines([
+          { y: Y_BASE, label: '1.000', color: C_BASE },
+          { y: TH1_LO, label: TH1_LO.toFixed(3), color: C_RED },
+          { y: TH1_HI, label: TH1_HI.toFixed(3), color: C_GREEN }
+        ]);
+      }
+      series.push(s);
     });
 
     allX.sort();
@@ -537,11 +613,18 @@
       },
       xAxis: baseXAxis(DAY_TICKS, true),
       yAxis: baseYAxis(Y2_MIN, Y2_MAX, Y2_STEP, 0),
+      visualMap: zoneVisualMap(1, TH2_LO, TH2_HI, '#e08a1e'),
       series: [{
         type: 'line', data: data, symbol: 'none', smooth: false,
-        lineStyle: { width: 1.7, color: '#e08a1e' },
+        // 同上：颜色交给 visualMap 分段决定
+        lineStyle: { width: 1.7 },
         areaStyle: areaFill('224,138,30'),
-        markLine: badgeLine(Y2_BASE, '0')
+        markArea: dangerZones(Y2_MIN, Y2_MAX, TH2_LO, TH2_HI),
+        markLine: badgeLines([
+          { y: Y2_BASE, label: '0', color: C_BASE },
+          { y: TH2_LO, label: String(TH2_LO), color: C_RED },
+          { y: TH2_HI, label: String(TH2_HI), color: C_GREEN }
+        ])
       }]
     }, true);
 
@@ -575,11 +658,20 @@
       if (!pts.length) return;                                // 完全没有可用点就不画（避免空图例）
       used.push({ date: day.date, fbl: fbl, color: color });
       var few = pts.length < 2;
-      series.push({
+      var s2 = {
         name: day.date, type: 'line', data: pts,
         symbol: few ? 'circle' : 'none', symbolSize: few ? 6 : 0, showSymbol: few,
         smooth: false, lineStyle: { width: 1.5, color: color }, itemStyle: { color: color }
-      });
+      };
+      if (!series.length) {
+        s2.markArea = dangerZones(Y2_MIN, Y2_MAX, TH2_LO, TH2_HI);
+        s2.markLine = badgeLines([
+          { y: Y2_BASE, label: '0', color: C_BASE },
+          { y: TH2_LO, label: String(TH2_LO), color: C_RED },
+          { y: TH2_HI, label: String(TH2_HI), color: C_GREEN }
+        ]);
+      }
+      series.push(s2);
     });
 
     allX.sort();
