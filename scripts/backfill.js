@@ -7,7 +7,13 @@
  *
  *   node scripts/backfill.js --days=5
  *
- * 指标：值(t) = 昨日封板率/100 × 883900涨跌幅(t)% + 1 + 上证涨跌幅(t)%/20
+ * 指标：值(t) = 昨日封板率/100 × (883900涨跌幅%(t) ÷ 100) + 1 + 上证涨跌幅%(t) ÷ 20
+ *
+ * ⚠️⚠️ 实测（2026-10-09）：**同花顺 v6/time 接口无法按日期取历史分时**。
+ *   路径里的日期会被忽略 —— 盘中访问返回当日实时数据，非交易时段返回最近一个完整交易日。
+ *   因此本脚本对 883900 / 上证 这类标的**目前跑不出多日历史**（会被下面的日期校验挡下并跳过）。
+ *   不要绕过这个校验，否则 data/ 里会塞进同一天的 N 份拷贝（曾真实发生过）。
+ *   5 日图目前只能靠 GitHub Actions 逐交易日累积。
  */
 
 const fs = require('fs');
@@ -74,6 +80,13 @@ async function getTimeSeries(prefix, code, dateNum) {
   }, 2);
   const pack = d[prefix + '_' + code];
   if (!pack || !pack.data) throw new Error('no time data ' + code + ' ' + dateNum);
+  // ⚠️ 同花顺 v6/time 对板块指数**不支持按日期取历史分时**：
+  //    盘中被访问时返回「当日实时」，非交易时段返回「最近一个完整交易日」，
+  //    路径里的日期实际被忽略。不校验的话，会把同一天的数据当成 N 天写进 data/。
+  if (String(pack.date) !== String(dateNum)) {
+    throw new Error('返回日期不符：请求 ' + dateNum + '，实际 ' + pack.date +
+      '（同花顺 v6/time 不支持按日期取板块历史分时）');
+  }
   const pre = parseFloat(pack.pre);
   const out = [];
   pack.data.split(';').forEach(function (r) {
@@ -111,7 +124,8 @@ async function getRate(dateNum) {
 // 指标值（涨跌幅按「小数口径」参与计算）
 //   v = 封板率/100 × (883900涨跌幅% ÷ 100) + 1 + (上证涨跌幅% ÷ 100) ÷ 20
 function computeValue(ratePct, a, b) {
-  return (ratePct / 100) * (a / 100) + 1 + (b / 100) / 20;
+  // 对应 Excel 式 =C3/100*D3+1+E3/20：883900 按小数代入，上证按百分点代入（不除 100）
+  return (ratePct / 100) * (a / 100) + 1 + b / 20;
 }
 
 async function main() {

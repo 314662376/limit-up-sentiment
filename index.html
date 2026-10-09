@@ -66,6 +66,7 @@
   .legend{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 0;font-size:12px;color:var(--sub);}
   .legend span{display:inline-flex;align-items:center;gap:6px;}
   .legend i{display:inline-block;width:14px;height:3px;border-radius:2px;}
+  .hint5d{font-size:12px;color:var(--sub);line-height:1.7;margin-top:8px;}
 
   footer{margin-top:24px;font-size:12px;color:var(--sub);line-height:1.85;}
   footer code{background:#eceef1;padding:1px 5px;border-radius:4px;font-size:11.5px;color:#404650;}
@@ -90,8 +91,8 @@
       <span>上证指数：<b id="shText">--</b></span>
     </div>
     <div class="formula">
-      <div><code>值 = 封板率/100 × 涨停表现 + 1 + 上证/20</code></div>
-      <div>涨跌幅以小数代入（如 0.13% → 0.0013）；<b>1.000 为中性基准</b>，越高于 1 表示打板赚钱效应越强</div>
+      <div><code>值 = 昨日封板率/100 × (昨日涨停表现% ÷ 100) + 1 + 上证% ÷ 20</code></div>
+      <div>等价于 Excel 式 <code>=C3/100*D3+1+E3/20</code>：<b>涨停表现按小数代入</b>（涨 2.48% → 0.0248），<b>上证按百分点代入</b>（涨 0.48% → 0.48）。<b>1.000 为中性基准</b>，越高于 1 表示打板赚钱效应越强</div>
     </div>
   </div>
 
@@ -113,6 +114,7 @@
       <h2>5 日分时 <span class="hint">最近 5 个交易日叠加对比（每条线的封板率系数取各自的前一交易日）</span></h2>
       <div class="chart short" id="chart5d"></div>
       <div class="legend" id="legend5d"></div>
+      <div class="hint5d" id="hint5d"></div>
     </section>
   </div>
 
@@ -120,7 +122,7 @@
 
   <footer>
     <div>· 指标构成：<code>昨日封板率</code> = 同花顺涨停池家数 ÷ (涨停池 + 炸板池)，取最近一个有数据交易日的收盘值；<code>涨停表现</code> = 同花顺 883900「昨日涨停表现」当日实时涨跌幅；<code>上证</code> = 上证指数当日实时涨跌幅。三者均来自同花顺公开行情接口。</div>
-    <div>· 历史数据（5 日图）由仓库内 <code>data/*.json</code> 提供，交易日盘中由 GitHub Actions 每分钟采集一次并自动提交；当日曲线则由浏览器实时直连计算，因此比存档更及时。图例中「基准」即该条曲线所用的「昨日封板率」所属交易日（曲线日的前一交易日），与顶部当日所用的基准同义。</div>
+    <div>· 历史数据（5 日图）由仓库内 <code>data/*.json</code> 提供，交易日盘中由 GitHub Actions 每分钟采集一次并自动提交；当日曲线则由浏览器实时直连计算，因此比存档更及时。图例中「基准」即该条曲线所用的「昨日封板率」所属交易日（曲线日的前一交易日），与顶部当日所用的基准同义。<b>同花顺不提供按日期的历史分时</b>，故 5 日图只能由 Actions 逐交易日累积，上线初期不足 5 条属正常。</div>
     <div>· y 轴刻度固定 0.025 一档（0.95 / 0.975 / 1.00 / 1.025 / 1.05 …），红色虚线为 <b>1.000</b> 中性基准。</div>
     <div>· 本页仅为公开数据的展示与整理，不构成任何投资建议。市场有风险，投资需谨慎。</div>
   </footer>

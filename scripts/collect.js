@@ -126,7 +126,8 @@ async function resolveLimitRate(baseYmd) {
 //   v = 封板率/100 × (883900涨跌幅% ÷ 100) + 1 + (上证涨跌幅% ÷ 100) ÷ 20
 //   实测值域约 0.975 ~ 1.025，与 0.025 一档的刻度吻合
 function computeValue(ratePct, pct883900, pctSH) {
-  return (ratePct / 100) * (pct883900 / 100) + 1 + (pctSH / 100) / 20;
+  // 对应 Excel 式 =C3/100*D3+1+E3/20：883900 按小数代入，上证按百分点代入（不除 100）
+  return (ratePct / 100) * (pct883900 / 100) + 1 + pctSH / 20;
 }
 
 function writeStore(dateStr, store) {

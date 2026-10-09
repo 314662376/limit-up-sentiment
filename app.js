@@ -23,7 +23,11 @@
 
   // 指标值：涨跌幅以「小数」代入
   function metric(ratePct, aPct, bPct) {
-    return (ratePct / 100) * (aPct / 100) + 1 + (bPct / 100) / 20;
+    // 对应 Excel 式 =C3/100*D3+1+E3/20
+    //   C 昨日封板率 → 百分数（47.92）
+    //   D 昨日涨停表现 → 小数（0.0248 即 2.48%）
+    //   E 上证%      → 百分数（0.48 即 +0.48%），不再除以 100
+    return (ratePct / 100) * (aPct / 100) + 1 + bPct / 20;
   }
 
   function shiftYmd(n, delta) {
@@ -313,6 +317,14 @@
         return '<span><i style="background:' + color + '"></i>' + d.date +
           '　封板率 ' + d.rate.rate.toFixed(2) + '%（基准 ' + rds + '）</span>';
       }).join('');
+    }
+
+    // 历史不足时的说明（同花顺不提供按日期的历史分时，只能逐日累积）
+    var h5 = document.getElementById('hint5d');
+    if (h5) {
+      h5.textContent = days.length < 2
+        ? '历史数据积累中：目前仅 ' + days.length + ' 个交易日。同花顺接口不提供按日期的历史分时，5 日图由 GitHub Actions 每个交易日自动追加一条曲线。'
+        : '';
     }
   }
 
