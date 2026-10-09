@@ -68,11 +68,16 @@ jobs:
             fi
             git commit -m "data: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M') 采集" || true
             # 用 HEAD:main 推送，避免 checkout 处于 detached HEAD 时推不出去
-            if ! git push origin HEAD:main; then
-              echo "  push 被拒，rebase 后重试"
-              git pull --rebase --autostash origin main || true
-              git push origin HEAD:main || echo "  !! push 仍失败，下一轮重试"
+            if git push origin HEAD:main; then return 0; fi
+            echo "  push 被拒，尝试 rebase 后重试"
+            # 先清掉可能残留的 rebase 状态，否则工作区会带冲突标记，下一轮 JSON 解析会失败
+            git rebase --abort 2>/dev/null || true
+            if ! git pull --rebase --autostash origin main; then
+              git rebase --abort 2>/dev/null || true
+              echo "  !! rebase 冲突，本轮放弃（数据留在本地提交，下一轮重试）"
+              return 0
             fi
+            git push origin HEAD:main || echo "  !! push 仍失败，下一轮重试"
           }
 
           # 定时任务跑 9 轮 × 14 分钟 ≈ 126 分钟（覆盖一个完整半场）；
