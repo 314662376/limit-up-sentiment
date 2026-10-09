@@ -12,6 +12,10 @@ on:
         description: '仅做连通性探测（只读不写），用于确认同花顺接口对 GitHub 出口 IP 是否放行'
         type: boolean
         default: false
+      minutes:
+        description: '手动模式：每轮采集分钟数（留空 = 14）。填较小的值可快速验证「采集→提交」链路'
+        type: string
+        default: ''
 
 permissions:
   contents: write             # 允许把 data/ 提交回仓库
@@ -42,17 +46,19 @@ jobs:
 
       # 手动触发 + 勾选 probe：只探测三个接口能否连通，不写任何数据
       - name: 连通性探测（手动触发专用）
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.probe == 'true' }}
         run: node scripts/collect.js --probe
 
       - name: 分段采集并提交
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.probe) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.probe == 'true') }}
         env:
           # 定时触发时由 cron 表达式判定时段；手动触发时为 auto（脚本按当前北京时间自动落 am/pm）
           SESSION: ${{ github.event.schedule == '55 4 * * 1-5' && 'pm' || (github.event.schedule == '25 1 * * 1-5' && 'am' || 'auto') }}
+          # 手动模式可缩短每轮时长；留空或定时触发时用默认 14 分钟
+          MIN_PER_ROUND: ${{ github.event.inputs.minutes || '14' }}
         run: |
           set -u
-          echo "session = $SESSION"
+          echo "session = $SESSION   minutes/round = $MIN_PER_ROUND"
 
           commit_if_any() {
             git add data/ || true
@@ -61,14 +67,21 @@ jobs:
               return 0
             fi
             git commit -m "data: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M') 采集" || true
-            # 拉一下避免远端有新提交（例如 Pages 相关改动）导致 push 被拒
-            git pull --rebase --autostash origin main || true
-            git push origin main || echo "  !! push 失败，下一轮重试"
+            # 用 HEAD:main 推送，避免 checkout 处于 detached HEAD 时推不出去
+            if ! git push origin HEAD:main; then
+              echo "  push 被拒，rebase 后重试"
+              git pull --rebase --autostash origin main || true
+              git push origin HEAD:main || echo "  !! push 仍失败，下一轮重试"
+            fi
           }
 
-          # 每轮跑 14 分钟，跑完立即提交，避免长任务被中途取消导致数据丢失
-          for i in $(seq 1 9); do
-            echo "--- 第 $i/9 轮 ---"
-            node scripts/collect.js --session="$SESSION" --minutes=14 || true
+          # 定时任务跑 9 轮 × 14 分钟 ≈ 126 分钟（覆盖一个完整半场）；
+          # 手动模式只跑 1 轮，便于快速验证。
+          if [ "$MIN_PER_ROUND" = "14" ]; then ROUNDS=9; else ROUNDS=1; fi
+          echo "rounds = $ROUNDS"
+
+          for i in $(seq 1 "$ROUNDS"); do
+            echo "--- 第 $i/$ROUNDS 轮 ---"
+            node scripts/collect.js --session="$SESSION" --minutes="$MIN_PER_ROUND" || true
             commit_if_any
           done
