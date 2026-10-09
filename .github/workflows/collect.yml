@@ -1,0 +1,74 @@
+name: collect-sentiment
+
+# 交易日盘中每分钟采集一次「涨停情绪指数」的三个输入量，写入 data/ 并自动提交。
+# cron 用 UTC；北京时间 = UTC+8，中国无夏令时，故固定为 09:25 / 12:55。
+on:
+  schedule:
+    - cron: '25 1 * * 1-5'    # 北京 09:25（早盘，采到 11:30）
+    - cron: '55 4 * * 1-5'    # 北京 12:55（午盘，采到 15:00）
+  workflow_dispatch:          # 支持手动触发，便于验证
+    inputs:
+      probe:
+        description: '仅做连通性探测（只读不写），用于确认同花顺接口对 GitHub 出口 IP 是否放行'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write             # 允许把 data/ 提交回仓库
+
+concurrency:
+  group: collect-sentiment
+  cancel-in-progress: false   # 两段 cron 串行，避免午盘把早盘任务中断
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150      # 9 轮 × 14 分钟 ≈ 126 分钟，留出余量
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 准备 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 配置 git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # 手动触发 + 勾选 probe：只探测三个接口能否连通，不写任何数据
+      - name: 连通性探测（手动触发专用）
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe }}
+        run: node scripts/collect.js --probe
+
+      - name: 分段采集并提交
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.probe) }}
+        env:
+          # 定时触发时由 cron 表达式判定时段；手动触发时为 auto（脚本按当前北京时间自动落 am/pm）
+          SESSION: ${{ github.event.schedule == '55 4 * * 1-5' && 'pm' || (github.event.schedule == '25 1 * * 1-5' && 'am' || 'auto') }}
+        run: |
+          set -u
+          echo "session = $SESSION"
+
+          commit_if_any() {
+            git add data/ || true
+            if git diff --staged --quiet; then
+              echo "  本轮无新增数据"
+              return 0
+            fi
+            git commit -m "data: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M') 采集" || true
+            # 拉一下避免远端有新提交（例如 Pages 相关改动）导致 push 被拒
+            git pull --rebase --autostash origin main || true
+            git push origin main || echo "  !! push 失败，下一轮重试"
+          }
+
+          # 每轮跑 14 分钟，跑完立即提交，避免长任务被中途取消导致数据丢失
+          for i in $(seq 1 9); do
+            echo "--- 第 $i/9 轮 ---"
+            node scripts/collect.js --session="$SESSION" --minutes=14 || true
+            commit_if_any
+          done

@@ -27,8 +27,10 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const STEP_MS = 60000;
 
 const args = process.argv.slice(2);
-const SESSION = (args.find(function (a) { return a.indexOf('--session=') === 0; }) || '--session=am').split('=')[1];
+// --session 可传 am / pm / auto（默认 auto：按当前北京时间自动判断，供 workflow_dispatch 手动触发用）
+const SESSION_ARG = (args.find(function (a) { return a.indexOf('--session=') === 0; }) || '--session=auto').split('=')[1];
 const ONCE = args.indexOf('--once') >= 0;
+const PROBE = args.indexOf('--probe') >= 0;   // 只读探测：验证三个接口是否可达，不写任何文件
 const minutesArg = args.find(function (a) { return a.indexOf('--minutes=') === 0; });
 const MINUTES = minutesArg ? parseInt(minutesArg.split('=')[1], 10) : 0;   // >0 时跑满 N 分钟即退出（供 CI 分批提交）
 
@@ -122,11 +124,11 @@ async function resolveLimitRate(baseYmd) {
   return null;
 }
 
-// 指标值（涨跌幅按「小数口径」参与计算）
-//   v = 封板率/100 × (883900涨跌幅% ÷ 100) + 1 + (上证涨跌幅% ÷ 100) ÷ 20
-//   实测值域约 0.975 ~ 1.025，与 0.025 一档的刻度吻合
+// 指标值（见 README「公式口径」，三列单位并不统一）
+//   值 = 封板率/100 × (883900涨跌幅% ÷ 100) + 1 + 上证涨跌幅% ÷ 20
+//   即 883900 按小数代入、上证按百分点代入；上证项权重最大（±1% ≈ ∓0.05）
 function computeValue(ratePct, pct883900, pctSH) {
-  // 对应 Excel 式 =C3/100*D3+1+E3/20：883900 按小数代入，上证按百分点代入（不除 100）
+  // 对应 Excel 式 =C3/100*D3+1+E3/20
   return (ratePct / 100) * (pct883900 / 100) + 1 + pctSH / 20;
 }
 
@@ -157,8 +159,43 @@ async function main() {
   const now = bjNow();
   const todayNum = ymdNum(now);
   const dateStr = ymdDate(now);
+  // auto：手动触发时按当前北京时间落到 am / pm，避免下午触发却按早盘跑而直接空转退出
+  const SESSION = (SESSION_ARG === 'am' || SESSION_ARG === 'pm')
+    ? SESSION_ARG
+    : (hmNum(now) < 1200 ? 'am' : 'pm');
 
-  console.log('[collect] 北京时间 ' + dateStr + ' ' + hmStr(now) + '，session=' + SESSION + (ONCE ? '，单次模式' : ''));
+  console.log('[collect] 北京时间 ' + dateStr + ' ' + hmStr(now) + '，session=' + SESSION +
+    (SESSION_ARG === 'auto' ? '(auto)' : '') + (ONCE ? '，单次模式' : ''));
+
+  // 只读探测：确认当前出口 IP 能否访问同花顺三组接口（GitHub Actions 跑在海外，需实测）
+  if (PROBE) {
+    const prev = shiftYmd(todayNum, -1);
+    console.log('[probe] 出口 IP 连通性探测（不写任何数据）');
+    try {
+      const r = await fetch('https://api.ipify.org');
+      console.log('[probe] 出口 IP = ' + (await r.text()).trim());
+    } catch (e) { console.log('[probe] 出口 IP 查询失败: ' + e.message); }
+
+    const checks = [
+      ['883900 实时涨跌幅', function () { return getChangePct('48', '883900'); }],
+      ['上证指数 实时涨跌幅', function () { return getChangePct('hs', '1A0001'); }],
+      ['涨停池家数 (' + prev + ')', function () { return getPoolTotal('zt', prev); }],
+      ['炸板池家数 (' + prev + ')', function () { return getPoolTotal('zb', prev); }]
+    ];
+    let ok = 0;
+    for (let i = 0; i < checks.length; i++) {
+      try {
+        const r = await retry(checks[i][1], 1);
+        ok++;
+        console.log('[probe] OK   ' + checks[i][0] + ' = ' + r);
+      } catch (e) {
+        console.log('[probe] FAIL ' + checks[i][0] + ' → ' + e.message);
+      }
+      await sleep(300);
+    }
+    console.log('[probe] 结束：' + ok + '/' + checks.length + ' 项可用');
+    process.exit(ok === checks.length ? 0 : 1);
+  }
 
   const rateInfo = await resolveLimitRate(todayNum);
   if (!rateInfo) {
