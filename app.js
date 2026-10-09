@@ -4,7 +4,8 @@
   /* ==================== 配置 ==================== */
   var BASE = 'https://d.10jqka.com.cn';
   var REFRESH_SEC = 60;
-  var AXIS_STEP = 0.025;          // y 轴刻度：0.95 / 0.975 / 1.00 / 1.025 / 1.05 …
+  var AXIS_STEP = 0.025;          // y 轴刻度：0.95 / 0.975 / 1.00 / 1.025 / 1.05
+  var Y_MIN = 0.95, Y_MAX = 1.05; // y 轴固定区间：不随数据自动放大缩小
   var DAYS_5D = 5;
   var COLORS = ['#2f6bd8', '#d93025', '#0f9d58', '#e08a1e', '#7b61c9'];
 
@@ -20,6 +21,38 @@
   function fmtT(s) { s = String(s); return s.length === 4 ? s.slice(0, 2) + ':' + s.slice(2) : s; }
   function fmtPct(v) { var n = num(v); return n === null ? '--' : (n > 0 ? '+' : '') + n.toFixed(2) + '%'; }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // 完整交易日的分钟刻度（09:30-11:30、13:00-15:00，午休不占位）。
+  // 当日分时图的横轴固定使用这一整套，盘中不随实时数据向右延长。
+  var DAY_TICKS = (function () {
+    var a = [];
+    function run(h0, m0, h1, m1) {
+      for (var c = h0 * 60 + m0, e = h1 * 60 + m1; c <= e; c++) {
+        a.push(pad(Math.floor(c / 60)) + ':' + pad(c % 60));
+      }
+    }
+    run(9, 30, 11, 30);
+    run(13, 0, 15, 0);
+    return a;
+  })();
+  var DAY_TICK_SET = {};
+  DAY_TICKS.forEach(function (t) { DAY_TICK_SET[t] = 1; });
+
+  // 当日图 x 轴只标这几个时刻，避免 242 个标签挤在一起
+  var DAY_LABELS = {
+    '09:30': 1, '10:00': 1, '10:30': 1, '11:00': 1,
+    '13:00': 1, '13:30': 1, '14:00': 1, '14:30': 1, '15:00': 1
+  };
+
+  // 超出固定 y 轴区间的点数（区间是硬约束，超出的点会被裁掉，用提示兜底）
+  function countOut(values) {
+    var n = 0;
+    for (var i = 0; i < values.length; i++) {
+      var v = values[i];
+      if (typeof v === 'number' && isFinite(v) && (v < Y_MIN || v > Y_MAX)) n++;
+    }
+    return n;
+  }
 
   // 指标值：涨跌幅以「小数」代入
   function metric(ratePct, aPct, bPct) {
@@ -50,20 +83,7 @@
     return '盘后';
   }
 
-  // y 轴范围：上下至少各留一个 0.025 档，并对齐到 0.025 的整数倍
-  function axisOf(values) {
-    var lo = 1 - AXIS_STEP, hi = 1 + AXIS_STEP;
-    for (var i = 0; i < values.length; i++) {
-      var v = values[i];
-      if (typeof v === 'number' && isFinite(v)) {
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
-      }
-    }
-    var min = Math.floor(lo / AXIS_STEP) * AXIS_STEP;
-    var max = Math.ceil(hi / AXIS_STEP) * AXIS_STEP;
-    return { min: +min.toFixed(6), max: +max.toFixed(6), interval: AXIS_STEP };
-  }
+  // y 轴固定区间，不再按数据自适应（避免盘中线一波动就缩放）
 
   /* ==================== JSONP ==================== */
   function jsonp(url, cbName, timeoutMs) {
@@ -169,12 +189,12 @@
     return charts[id];
   }
 
-  function baseYAxis(ax) {
+  function baseYAxis() {
     return {
       type: 'value',
-      min: ax.min,
-      max: ax.max,
-      interval: ax.interval,
+      min: Y_MIN,
+      max: Y_MAX,
+      interval: AXIS_STEP,
       axisLine: { show: false },
       axisTick: { show: false },
       axisLabel: { color: '#9aa1ab', fontSize: 11, formatter: function (v) { return Number(v).toFixed(3); } },
@@ -182,17 +202,23 @@
     };
   }
 
-  function baseXAxis(xs) {
+  function baseXAxis(xs, isDay) {
     return {
       type: 'category',
       data: xs,
       boundaryGap: false,
       axisLine: { lineStyle: { color: '#dfe2e7' } },
       axisTick: { show: false },
-      axisLabel: {
-        color: '#9aa1ab', fontSize: 10,
-        interval: xs.length ? Math.max(0, Math.ceil(xs.length / 8) - 1) : 0
-      }
+      axisLabel: isDay
+        ? {
+          color: '#9aa1ab', fontSize: 10,
+          // 固定刻度下只保留整/半小时，避免 242 个标签互相压叠
+          interval: function (i, v) { return !!DAY_LABELS[v]; }
+        }
+        : {
+          color: '#9aa1ab', fontSize: 10,
+          interval: xs.length ? Math.max(0, Math.ceil(xs.length / 8) - 1) : 0
+        }
     };
   }
 
@@ -211,13 +237,13 @@
   function drawToday(rows, ratePct) {
     var c = getChart('chartToday');
     if (!c) return;
-    var xs = [], ys = [];
+    var pts = [];
     rows.forEach(function (p) {
-      if (p.pct == null) return;
-      xs.push(p.t);
-      ys.push(metric(ratePct, p.pct, p.bPct));
+      if (p.pct == null || !DAY_TICK_SET[p.t]) return;
+      pts.push({ t: p.t, v: metric(ratePct, p.pct, p.bPct), pct: p.pct, bPct: p.bPct });
     });
-    var ax = axisOf(ys);
+    // 用 [时刻, 值] 配对：横轴固定为完整一天，数据只铺到当前时刻，右半段自然留白
+    var data = pts.map(function (x) { return [x.t, +x.v.toFixed(5)]; });
     c.setOption({
       animation: false,
       grid: { left: 64, right: 22, top: 24, bottom: 30 },
@@ -229,17 +255,18 @@
         formatter: function (ps) {
           if (!ps || !ps.length) return '';
           var it = ps[0];
-          var p = rows[it.dataIndex] || {};
+          var p = pts[it.dataIndex];
+          if (!p) return '';
           return it.axisValue +
-            '<br/>指标 <b>' + Number(it.data).toFixed(4) + '</b>' +
+            '<br/>指标 <b>' + p.v.toFixed(4) + '</b>' +
             '<br/>883900 ' + fmtPct(p.pct) +
             '<br/>上证 ' + fmtPct(p.bPct);
         }
       },
-      xAxis: baseXAxis(xs),
-      yAxis: baseYAxis(ax),
+      xAxis: baseXAxis(DAY_TICKS, true),
+      yAxis: baseYAxis(),
       series: [{
-        type: 'line', data: ys, symbol: 'none', smooth: false,
+        type: 'line', data: data, symbol: 'none', smooth: false,
         lineStyle: { width: 1.7, color: '#2f6bd8' },
         areaStyle: {
           color: {
@@ -253,6 +280,12 @@
         markLine: benchmarkLine()
       }]
     }, true);
+
+    var over = countOut(pts.map(function (x) { return x.v; }));
+    setText('hintToday', over
+      ? ('⚠ 有 ' + over + ' 个点超出 ' + Y_MIN.toFixed(3) + '~' + Y_MAX.toFixed(3) +
+        ' 固定显示区间，已裁掉不可见（区间不随数据缩放）。')
+      : '');
   }
 
   function draw5d(days) {
@@ -282,7 +315,6 @@
     });
 
     allX.sort();
-    var ax = axisOf(allV);
 
     c.setOption({
       animation: false,
@@ -303,7 +335,7 @@
         }
       },
       xAxis: baseXAxis(allX),
-      yAxis: baseYAxis(ax),
+      yAxis: baseYAxis(),
       series: series
     }, true);
 
@@ -326,6 +358,12 @@
         ? '历史数据积累中：目前仅 ' + days.length + ' 个交易日。同花顺接口不提供按日期的历史分时，5 日图由 GitHub Actions 每个交易日自动追加一条曲线。'
         : '';
     }
+
+    var over5 = countOut(allV);
+    setText('hintY5d', over5
+      ? ('⚠ 有 ' + over5 + ' 个点超出 ' + Y_MIN.toFixed(3) + '~' + Y_MAX.toFixed(3) +
+        ' 固定显示区间，已裁掉不可见（区间不随数据缩放）。')
+      : '');
   }
 
   /* ==================== 主流程 ==================== */
