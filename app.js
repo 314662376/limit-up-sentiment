@@ -234,9 +234,19 @@
     };
   }
 
-  function drawToday(rows, ratePct) {
-    var c = getChart('chartToday');
+  function drawToday(rows, ratePct, notices) {
+    var c = getChart('chartMain');
     if (!c) return;
+    var lg = document.getElementById('legendMain');
+    if (lg) lg.innerHTML = '';
+
+    if (ratePct == null) {
+      // 基准（昨日封板率）还没取到就不画，避免画出一条无意义的线
+      c.clear();
+      notices.push('昨日封板率基准尚未取到，曲线暂不可用。');
+      return;
+    }
+
     var pts = [];
     rows.forEach(function (p) {
       if (p.pct == null || !DAY_TICK_SET[p.t]) return;
@@ -281,15 +291,16 @@
       }]
     }, true);
 
+    if (!pts.length) notices.push('当日暂无分时数据（未开盘或数据源暂不可用）。');
     var over = countOut(pts.map(function (x) { return x.v; }));
-    setText('hintToday', over
-      ? ('⚠ 有 ' + over + ' 个点超出 ' + Y_MIN.toFixed(3) + '~' + Y_MAX.toFixed(3) +
-        ' 固定显示区间，已裁掉不可见（区间不随数据缩放）。')
-      : '');
+    if (over) {
+      notices.push('⚠ 有 ' + over + ' 个点超出 ' + Y_MIN.toFixed(3) + '~' + Y_MAX.toFixed(3) +
+        ' 固定显示区间，已裁掉不可见（区间不随数据缩放）。');
+    }
   }
 
-  function draw5d(days) {
-    var c = getChart('chart5d');
+  function draw5d(days, notices) {
+    var c = getChart('chartMain');
     if (!c) return;
     var set = {}, allX = [];
     var series = [];
@@ -320,6 +331,14 @@
 
     allX.sort();
 
+    if (!series.length) {
+      c.clear();
+      var lg0 = document.getElementById('legendMain');
+      if (lg0) lg0.innerHTML = '';
+      notices.push('历史数据积累中：暂无任何交易日存档，5 日图将在 GitHub Actions 采集后出现。');
+      return;
+    }
+
     c.setOption({
       animation: false,
       grid: { left: 64, right: 22, top: 24, bottom: 30 },
@@ -344,7 +363,7 @@
     }, true);
 
     // 图例
-    var lg = document.getElementById('legend5d');
+    var lg = document.getElementById('legendMain');
     if (lg) {
       lg.innerHTML = days.map(function (d, i) {
         var color = COLORS[i % COLORS.length];
@@ -356,18 +375,50 @@
     }
 
     // 历史不足时的说明（同花顺不提供按日期的历史分时，只能逐日累积）
-    var h5 = document.getElementById('hint5d');
-    if (h5) {
-      h5.textContent = days.length < 2
-        ? '历史数据积累中：目前仅 ' + days.length + ' 个交易日。同花顺接口不提供按日期的历史分时，5 日图由 GitHub Actions 每个交易日自动追加一条曲线。'
-        : '';
+    if (days.length < 2) {
+      notices.push('历史数据积累中：目前仅 ' + days.length + ' 个交易日。同花顺接口不提供按日期的历史分时，' +
+        '5 日图由 GitHub Actions 每个交易日自动追加一条曲线。');
     }
 
     var over5 = countOut(allV);
-    setText('hintY5d', over5
-      ? ('⚠ 有 ' + over5 + ' 个点超出 ' + Y_MIN.toFixed(3) + '~' + Y_MAX.toFixed(3) +
-        ' 固定显示区间，已裁掉不可见（区间不随数据缩放）。')
-      : '');
+    if (over5) {
+      notices.push('⚠ 有 ' + over5 + ' 个点超出 ' + Y_MIN.toFixed(3) + '~' + Y_MAX.toFixed(3) +
+        ' 固定显示区间，已裁掉不可见（区间不随数据缩放）。');
+    }
+  }
+
+  /* ==================== 视图切换（1日 / 5日） ==================== */
+  var VIEW = '1d';
+  var state = { rows: [], ratePct: null, days: [] };
+
+  function renderMain() {
+    var notices = [];
+    if (VIEW === '1d') drawToday(state.rows, state.ratePct, notices);
+    else draw5d(state.days, notices);
+    var el = document.getElementById('hintMain');
+    if (el) el.innerHTML = notices.filter(Boolean).join('<br/>');
+  }
+
+  function bindTabs() {
+    var box = document.getElementById('viewTabs');
+    if (!box) return;
+    box.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('button[data-v]') : null;
+      if (!b) return;
+      var v = b.getAttribute('data-v');
+      if (v === VIEW) return;
+      VIEW = v;
+      Array.prototype.forEach.call(box.querySelectorAll('button'), function (x) {
+        x.className = (x === b) ? 'on' : '';
+      });
+      var hint = document.getElementById('viewHint');
+      if (hint) {
+        hint.textContent = (v === '1d')
+          ? '实时计算，每分钟刷新；横轴固定为完整交易日 09:30–15:00'
+          : '最近 5 个交易日叠加对比（每条线的封板率系数取各自的前一交易日）';
+      }
+      renderMain();
+    });
   }
 
   /* ==================== 主流程 ==================== */
@@ -393,7 +444,7 @@
       // 0) 历史（5 日图 & 非交易时段的当日图都依赖它）
       var days = [];
       try { days = await loadHistory(); } catch (e) { days = []; }
-      if (days.length) draw5d(days);
+      state.days = days;
 
       var rows = [], rate = null, dataDate = null;
 
@@ -428,6 +479,9 @@
       }
 
       // ---- 渲染 ----
+      state.rows = rows;
+      state.ratePct = rate ? rate.rate : null;
+
       if (rate) {
         setText('rateText', rate.rate.toFixed(2) + '%（' + rate.zt + '/' + (rate.zt + rate.zb) + '，基准日 ' + rate.date + '）');
       } else {
@@ -448,8 +502,10 @@
         setText('aText', fmtPct(last.pct));
         setText('shText', fmtPct(last.bPct));
         setText('lastPoint', last.t);
-        drawToday(rows, rate.rate);
       }
+
+      // 按当前选中的视图（1日 / 5日）绘制
+      renderMain();
 
       if (dataDate) {
         setText('quoteTime', dataDate.slice(0, 4) + '-' + dataDate.slice(4, 6) + '-' + dataDate.slice(6, 8));
@@ -481,6 +537,7 @@
   }
 
   /* ==================== 启动 ==================== */
+  bindTabs();
   refresh();
   setInterval(tick, 1000);
 })();

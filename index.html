@@ -63,6 +63,16 @@
   .chart{width:100%;height:300px;}
   .chart.short{height:280px;}
 
+  .cardhead{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:4px;}
+  .cardhead h2{margin:0;}
+  .tabs{display:flex;gap:6px;margin-left:auto;}
+  .tabs button{
+    font:inherit;font-size:12px;padding:4px 13px;border-radius:7px;cursor:pointer;
+    border:1px solid var(--line);background:#fff;color:var(--sub);transition:.15s;
+  }
+  .tabs button:hover{border-color:var(--brand);color:var(--brand);}
+  .tabs button.on{background:var(--brand);border-color:var(--brand);color:#fff;}
+
   .legend{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 0;font-size:12px;color:var(--sub);}
   .legend span{display:inline-flex;align-items:center;gap:6px;}
   .legend i{display:inline-block;width:14px;height:3px;border-radius:2px;}
@@ -106,17 +116,16 @@
 
   <div class="grid">
     <section class="card">
-      <h2>当日分时 <span class="hint">实时计算，每分钟刷新；横轴固定为完整交易日 09:30–15:00</span></h2>
-      <div class="chart" id="chartToday"></div>
-      <div class="hint5d" id="hintToday"></div>
-    </section>
-
-    <section class="card">
-      <h2>5 日分时 <span class="hint">最近 5 个交易日叠加对比（每条线的封板率系数取各自的前一交易日）</span></h2>
-      <div class="chart short" id="chart5d"></div>
-      <div class="legend" id="legend5d"></div>
-      <div class="hint5d" id="hint5d"></div>
-      <div class="hint5d" id="hintY5d"></div>
+      <div class="cardhead">
+        <h2>涨停情绪指数 <span class="hint" id="viewHint">实时计算，每分钟刷新；横轴固定为完整交易日 09:30–15:00</span></h2>
+        <div class="tabs" id="viewTabs">
+          <button data-v="1d" class="on">1日</button>
+          <button data-v="5d">5日</button>
+        </div>
+      </div>
+      <div class="chart" id="chartMain"></div>
+      <div class="legend" id="legendMain"></div>
+      <div class="hint5d" id="hintMain"></div>
     </section>
   </div>
 
