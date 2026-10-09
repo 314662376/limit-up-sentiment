@@ -303,11 +303,15 @@
         if (!set[p.t]) { set[p.t] = 1; allX.push(p.t); }
         return [p.t, +v.toFixed(5)];
       });
+      // 初期某天可能只有 1-2 个点：此时连线画不出来，至少把点标出来，避免「图例有、图上没有」
+      var few = pts.length < 2;
       series.push({
         name: day.date,
         type: 'line',
         data: pts,
-        symbol: 'none',
+        symbol: few ? 'circle' : 'none',
+        symbolSize: few ? 6 : 0,
+        showSymbol: few,
         smooth: false,
         lineStyle: { width: 1.5, color: color },
         itemStyle: { color: color }
