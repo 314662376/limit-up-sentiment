@@ -1,13 +1,28 @@
 (function () {
   'use strict';
 
-  /* ==================== 配置 ==================== */
+  /* ============================================================
+   * 两个指数
+   *  ① 涨停情绪指数（无量纲，1.000 = 中性）
+   *     值 = 昨日封板率/100 × (883900涨跌幅% ÷ 100) + 1 + 上证涨跌幅% ÷ 20
+   *     Excel 式 =C3/100*D3+1+E3/20          → y 轴固定 0.95 ~ 1.05
+   *
+   *  ② 打板收益（元 / 万元本金，0 = 不赚不亏）
+   *     值 = 10000*(1+883918%)*昨日炸板率 + 10000*(1+883900%)*昨日非一字板封板率 − 10000
+   *     Excel 式 =10000*(1+F2)*E2+10000*(1+D2)*C2-10000
+   *     条件：昨日非一字板封板率(C) + 昨日炸板率(E) = 100%，故等价于
+   *     值 = 100 × ( 883918% × 炸板率 + 883900% × 非一字板封板率 )
+   *     → y 轴固定 −100 ~ 200
+   * ============================================================ */
   var BASE = 'https://d.10jqka.com.cn';
   var REFRESH_SEC = 60;
-  var AXIS_STEP = 0.025;          // y 轴刻度：0.95 / 0.975 / 1.00 / 1.025 / 1.05
-  var Y_MIN = 0.95, Y_MAX = 1.05; // y 轴固定区间：不随数据自动放大缩小
   var DAYS_5D = 5;
   var COLORS = ['#2f6bd8', '#d93025', '#0f9d58', '#e08a1e', '#7b61c9'];
+
+  // 指数①：y 轴固定区间
+  var Y_MIN = 0.95, Y_MAX = 1.05, Y_STEP = 0.025, Y_BASE = 1;
+  // 指数②：y 轴固定区间
+  var Y2_MIN = -100, Y2_MAX = 200, Y2_STEP = 50, Y2_BASE = 0;
 
   var charts = {};
   var left = REFRESH_SEC;
@@ -18,12 +33,13 @@
   function setText(id, t) { var e = document.getElementById(id); if (e) e.textContent = t; }
   function num(v) { var n = parseFloat(v); return isFinite(n) ? n : null; }
   function cls1(v) { return v > 1.0000001 ? 'up' : (v < 0.9999999 ? 'down' : 'flat'); }
+  function cls2(v) { return v > 0.004 ? 'up' : (v < -0.004 ? 'down' : 'flat'); }
   function fmtT(s) { s = String(s); return s.length === 4 ? s.slice(0, 2) + ':' + s.slice(2) : s; }
   function fmtPct(v) { var n = num(v); return n === null ? '--' : (n > 0 ? '+' : '') + n.toFixed(2) + '%'; }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
   // 完整交易日的分钟刻度（09:30-11:30、13:00-15:00，午休不占位）。
-  // 当日分时图的横轴固定使用这一整套，盘中不随实时数据向右延长。
+  // 两张图的当日分时都用这一整套横轴，盘中不随实时数据向右延长。
   var DAY_TICKS = (function () {
     var a = [];
     function run(h0, m0, h1, m1) {
@@ -45,22 +61,31 @@
   };
 
   // 超出固定 y 轴区间的点数（区间是硬约束，超出的点会被裁掉，用提示兜底）
-  function countOut(values) {
+  function countOut(values, min, max) {
     var n = 0;
     for (var i = 0; i < values.length; i++) {
       var v = values[i];
-      if (typeof v === 'number' && isFinite(v) && (v < Y_MIN || v > Y_MAX)) n++;
+      if (typeof v === 'number' && isFinite(v) && (v < min || v > max)) n++;
     }
     return n;
   }
 
-  // 指标值：涨跌幅以「小数」代入
+  // 指数①：涨跌幅以「小数」代入
   function metric(ratePct, aPct, bPct) {
     // 对应 Excel 式 =C3/100*D3+1+E3/20
     //   C 昨日封板率 → 百分数（47.92）
     //   D 昨日涨停表现 → 小数（0.0248 即 2.48%）
     //   E 上证%      → 百分数（0.48 即 +0.48%），不再除以 100
     return (ratePct / 100) * (aPct / 100) + 1 + bPct / 20;
+  }
+
+  // 指数②：C 非一字板封板率(%)、E 炸板率(%) 互补
+  //   = 100 × ( 883918% × 炸板率 + 883900% × 非一字板封板率 )
+  function metric2(cPct, aPct, fblPct) {
+    if (fblPct == null || !isFinite(fblPct)) return null;
+    if (cPct == null || aPct == null) return null;
+    var fbl = fblPct / 100, zbl = 1 - fbl;
+    return 100 * (cPct * zbl + aPct * fbl);
   }
 
   function shiftYmd(n, delta) {
@@ -82,8 +107,6 @@
     if (m <= 900) return '盘中 · 午盘';
     return '盘后';
   }
-
-  // y 轴固定区间，不再按数据自适应（避免盘中线一波动就缩放）
 
   /* ==================== JSONP ==================== */
   function jsonp(url, cbName, timeoutMs) {
@@ -178,7 +201,7 @@
     return out;
   }
 
-  /* ==================== 图表 ==================== */
+  /* ==================== 图表公共部件 ==================== */
   function getChart(id) {
     if (!charts[id]) {
       var dom = document.getElementById(id);
@@ -189,15 +212,18 @@
     return charts[id];
   }
 
-  function baseYAxis() {
+  function baseYAxis(min, max, step, digits) {
     return {
       type: 'value',
-      min: Y_MIN,
-      max: Y_MAX,
-      interval: AXIS_STEP,
+      min: min,
+      max: max,
+      interval: step,
       axisLine: { show: false },
       axisTick: { show: false },
-      axisLabel: { color: '#9aa1ab', fontSize: 11, formatter: function (v) { return Number(v).toFixed(3); } },
+      axisLabel: {
+        color: '#9aa1ab', fontSize: 11,
+        formatter: function (v) { return digits ? Number(v).toFixed(digits) : String(Number(v)); }
+      },
       splitLine: { lineStyle: { color: '#f1f2f4' } }
     };
   }
@@ -222,18 +248,28 @@
     };
   }
 
-  function benchmarkLine() {
+  function badgeLine(y, label) {
     return {
       silent: true, symbol: 'none',
       lineStyle: { color: '#d93025', type: 'dashed', width: 1, opacity: .55 },
-      label: {
-        show: true, position: 'insideEndTop',
-        formatter: '1.000', color: '#d93025', fontSize: 10
-      },
-      data: [{ yAxis: 1 }]
+      label: { show: true, position: 'insideEndTop', formatter: label, color: '#d93025', fontSize: 10 },
+      data: [{ yAxis: y }]
     };
   }
 
+  function areaFill(rgb) {
+    return {
+      color: {
+        type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+        colorStops: [
+          { offset: 0, color: 'rgba(' + rgb + ',.20)' },
+          { offset: 1, color: 'rgba(' + rgb + ',.01)' }
+        ]
+      }
+    };
+  }
+
+  /* ==================== 指数① 涨停情绪指数 ==================== */
   function drawToday(rows, ratePct, notices) {
     var c = getChart('chartMain');
     if (!c) return;
@@ -274,25 +310,17 @@
         }
       },
       xAxis: baseXAxis(DAY_TICKS, true),
-      yAxis: baseYAxis(),
+      yAxis: baseYAxis(Y_MIN, Y_MAX, Y_STEP, 3),
       series: [{
         type: 'line', data: data, symbol: 'none', smooth: false,
         lineStyle: { width: 1.7, color: '#2f6bd8' },
-        areaStyle: {
-          color: {
-            type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
-            colorStops: [
-              { offset: 0, color: 'rgba(47,107,216,.20)' },
-              { offset: 1, color: 'rgba(47,107,216,.01)' }
-            ]
-          }
-        },
-        markLine: benchmarkLine()
+        areaStyle: areaFill('47,107,216'),
+        markLine: badgeLine(Y_BASE, '1.000')
       }]
     }, true);
 
     if (!pts.length) notices.push('当日暂无分时数据（未开盘或数据源暂不可用）。');
-    var over = countOut(pts.map(function (x) { return x.v; }));
+    var over = countOut(pts.map(function (x) { return x.v; }), Y_MIN, Y_MAX);
     if (over) {
       notices.push('⚠ 有 ' + over + ' 个点超出 ' + Y_MIN.toFixed(3) + '~' + Y_MAX.toFixed(3) +
         ' 固定显示区间，已裁掉不可见（区间不随数据缩放）。');
@@ -358,11 +386,10 @@
         }
       },
       xAxis: baseXAxis(allX),
-      yAxis: baseYAxis(),
+      yAxis: baseYAxis(Y_MIN, Y_MAX, Y_STEP, 3),
       series: series
     }, true);
 
-    // 图例
     var lg = document.getElementById('legendMain');
     if (lg) {
       lg.innerHTML = days.map(function (d, i) {
@@ -374,34 +401,195 @@
       }).join('');
     }
 
-    // 历史不足时的说明（同花顺不提供按日期的历史分时，只能逐日累积）
     if (days.length < 2) {
       notices.push('历史数据积累中：目前仅 ' + days.length + ' 个交易日。同花顺接口不提供按日期的历史分时，' +
         '5 日图由 GitHub Actions 每个交易日自动追加一条曲线。');
     }
 
-    var over5 = countOut(allV);
+    var over5 = countOut(allV, Y_MIN, Y_MAX);
     if (over5) {
       notices.push('⚠ 有 ' + over5 + ' 个点超出 ' + Y_MIN.toFixed(3) + '~' + Y_MAX.toFixed(3) +
         ' 固定显示区间，已裁掉不可见（区间不随数据缩放）。');
     }
   }
 
-  /* ==================== 视图切换（1日 / 5日） ==================== */
-  var VIEW = '1d';
-  var state = { rows: [], ratePct: null, days: [] };
+  /* ==================== 指数② 打板收益 ==================== */
+  function drawToday2(rows, fblPct, notices) {
+    var c = getChart('chart2');
+    if (!c) return;
+    var lg = document.getElementById('legend2');
+    if (lg) lg.innerHTML = '';
 
-  function renderMain() {
-    var notices = [];
-    if (VIEW === '1d') drawToday(state.rows, state.ratePct, notices);
-    else draw5d(state.days, notices);
-    var el = document.getElementById('hintMain');
-    if (el) el.innerHTML = notices.filter(Boolean).join('<br/>');
+    if (fblPct == null) {
+      c.clear();
+      notices.push('昨日非一字板封板率尚未取到，打板收益曲线暂不可用。');
+      return;
+    }
+
+    var pts = [];
+    rows.forEach(function (p) {
+      if (p.pct == null || p.cPct == null || !DAY_TICK_SET[p.t]) return;
+      var v = metric2(p.cPct, p.pct, fblPct);
+      if (v == null) return;
+      pts.push({ t: p.t, v: v, pct: p.pct, cPct: p.cPct });
+    });
+    var data = pts.map(function (x) { return [x.t, +x.v.toFixed(2)]; });
+
+    c.setOption({
+      animation: false,
+      grid: { left: 64, right: 22, top: 24, bottom: 30 },
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: 'rgba(255,255,255,.97)',
+        borderColor: '#e8eaed',
+        textStyle: { color: '#1f2329', fontSize: 12 },
+        formatter: function (ps) {
+          if (!ps || !ps.length) return '';
+          var it = ps[0];
+          var p = pts[it.dataIndex];
+          if (!p) return '';
+          return it.axisValue +
+            '<br/>打板收益 <b>' + p.v.toFixed(2) + '</b> 元/万' +
+            '<br/>883900 ' + fmtPct(p.pct) +
+            '<br/>883918 ' + fmtPct(p.cPct);
+        }
+      },
+      xAxis: baseXAxis(DAY_TICKS, true),
+      yAxis: baseYAxis(Y2_MIN, Y2_MAX, Y2_STEP, 0),
+      series: [{
+        type: 'line', data: data, symbol: 'none', smooth: false,
+        lineStyle: { width: 1.7, color: '#e08a1e' },
+        areaStyle: areaFill('224,138,30'),
+        markLine: badgeLine(Y2_BASE, '0')
+      }]
+    }, true);
+
+    if (!pts.length) notices.push('当日暂无分时数据（未开盘或数据源暂不可用）。');
+    var over = countOut(pts.map(function (x) { return x.v; }), Y2_MIN, Y2_MAX);
+    if (over) {
+      notices.push('⚠ 有 ' + over + ' 个点超出 ' + Y2_MIN + '~' + Y2_MAX +
+        ' 固定显示区间，已裁掉不可见（区间不随数据缩放）。');
+    }
+  }
+
+  function draw5d2(days, notices) {
+    var c = getChart('chart2');
+    if (!c) return;
+    var set = {}, allX = [], series = [], allV = [];
+    var used = [];
+
+    days.forEach(function (day, i) {
+      var fbl = day.rate && day.rate.fbl;
+      if (fbl == null || !isFinite(fbl)) return;             // 该日缺「非一字板封板率」基准
+      var color = COLORS[i % COLORS.length];
+      var pts = [];
+      (day.points || []).forEach(function (p) {
+        if (p.c == null) return;                              // 缺 883918 的点跳过
+        var v = metric2(p.c, p.a, fbl);
+        if (v == null) return;
+        allV.push(v);
+        if (!set[p.t]) { set[p.t] = 1; allX.push(p.t); }
+        pts.push([p.t, +v.toFixed(2)]);
+      });
+      if (!pts.length) return;                                // 完全没有可用点就不画（避免空图例）
+      used.push({ date: day.date, fbl: fbl, color: color });
+      var few = pts.length < 2;
+      series.push({
+        name: day.date, type: 'line', data: pts,
+        symbol: few ? 'circle' : 'none', symbolSize: few ? 6 : 0, showSymbol: few,
+        smooth: false, lineStyle: { width: 1.5, color: color }, itemStyle: { color: color }
+      });
+    });
+
+    allX.sort();
+    var lg = document.getElementById('legend2');
+
+    if (!series.length) {
+      c.clear();
+      if (lg) lg.innerHTML = '';
+      notices.push('打板收益的 5 日图需要同时具备「非一字板封板率」和 883918 分时，' +
+        '而 883918 历史分时不可获取，只能从本指标上线当天起逐日累积。');
+      return;
+    }
+
+    c.setOption({
+      animation: false,
+      grid: { left: 64, right: 22, top: 24, bottom: 30 },
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: 'rgba(255,255,255,.97)',
+        borderColor: '#e8eaed',
+        textStyle: { color: '#1f2329', fontSize: 12 },
+        formatter: function (ps) {
+          if (!ps || !ps.length) return '';
+          var out = [ps[0].axisValue];
+          ps.forEach(function (it) {
+            if (it.data == null) return;
+            out.push(it.marker + it.seriesName + ' <b>' + Number(it.data[1]).toFixed(2) + '</b>');
+          });
+          return out.join('<br/>');
+        }
+      },
+      xAxis: baseXAxis(allX),
+      yAxis: baseYAxis(Y2_MIN, Y2_MAX, Y2_STEP, 0),
+      series: series
+    }, true);
+
+    if (lg) {
+      lg.innerHTML = used.map(function (u) {
+        return '<span><i style="background:' + u.color + '"></i>' + u.date +
+          '　非一字板封板率 ' + u.fbl.toFixed(2) + '%</span>';
+      }).join('');
+    }
+
+    if (used.length < 2) {
+      notices.push('打板收益的历史曲线积累中：目前仅 ' + used.length + ' 个交易日。' +
+        '同花顺不提供 883918 的历史分时，只能逐交易日累积。');
+    }
+    var over = countOut(allV, Y2_MIN, Y2_MAX);
+    if (over) {
+      notices.push('⚠ 有 ' + over + ' 个点超出 ' + Y2_MIN + '~' + Y2_MAX +
+        ' 固定显示区间，已裁掉不可见（区间不随数据缩放）。');
+    }
+  }
+
+  /* ==================== 视图切换（1日 / 5日，两张图共用） ==================== */
+  var VIEW = (function () {
+    // 支持 ?view=5d 深链接直达
+    try {
+      var m = String(location.search).match(/[?&]view=(1d|5d)\b/);
+      return m ? m[1] : '1d';
+    } catch (e) { return '1d'; }
+  })();
+  var state = { rows: [], rate: null, days: [] };
+
+  function renderAll() {
+    var n1 = [], n2 = [];
+    var isDay = (VIEW === '1d');
+    if (isDay) {
+      drawToday(state.rows, state.rate ? state.rate.rate : null, n1);
+      drawToday2(state.rows, state.rate ? state.rate.fbl : null, n2);
+    } else {
+      draw5d(state.days, n1);
+      draw5d2(state.days, n2);
+    }
+    var e1 = document.getElementById('hintMain');
+    if (e1) e1.innerHTML = n1.filter(Boolean).join('<br/>');
+    var e2 = document.getElementById('hint2');
+    if (e2) e2.innerHTML = n2.filter(Boolean).join('<br/>');
   }
 
   function bindTabs() {
     var box = document.getElementById('viewTabs');
     if (!box) return;
+    // 初始态与 VIEW 对齐（含 ?view=5d 直达）
+    Array.prototype.forEach.call(box.querySelectorAll('button'), function (x) {
+      x.className = (x.getAttribute('data-v') === VIEW) ? 'on' : '';
+    });
+    var hint0 = document.getElementById('viewHint');
+    if (hint0 && VIEW === '5d') {
+      hint0.textContent = '最近 5 个交易日叠加对比（每张图各自取所属交易日的基准）';
+    }
     box.addEventListener('click', function (e) {
       var b = e.target.closest ? e.target.closest('button[data-v]') : null;
       if (!b) return;
@@ -415,9 +603,9 @@
       if (hint) {
         hint.textContent = (v === '1d')
           ? '实时计算，每分钟刷新；横轴固定为完整交易日 09:30–15:00'
-          : '最近 5 个交易日叠加对比（每条线的封板率系数取各自的前一交易日）';
+          : '最近 5 个交易日叠加对比（每张图各自取所属交易日的基准）';
       }
-      renderMain();
+      renderAll();
     });
   }
 
@@ -451,15 +639,22 @@
       if (inSession(now)) {
         // ---- 盘中：直连同花顺实时分时，逐分钟现算 ----
         var aPack = await getTimeSeries('a', '48', '883900');
-        await sleep(200);
+        await sleep(160);
         var bPack = await getTimeSeries('b', 'hs', '1A0001');
+        await sleep(160);
+        var cPack = null;
+        try { cPack = await getTimeSeries('c', '48', '883918'); } catch (e) { cPack = null; }
 
         var bMap = {};
         bPack.rows.forEach(function (x) { bMap[x.t] = x.pct; });
+        var cMap = {};
+        if (cPack) cPack.rows.forEach(function (x) { cMap[x.t] = x.pct; });
+
         aPack.rows.forEach(function (x) {
           var b = bMap[x.t];
           if (x.pct == null || b == null) return;
-          rows.push({ t: x.t, pct: x.pct, bPct: b });
+          // 883918 取不到时只置空 cPct（指数②跳过该点），不影响指数①
+          rows.push({ t: x.t, pct: x.pct, bPct: b, cPct: (cMap[x.t] == null ? null : cMap[x.t]) });
         });
         dataDate = aPack.date ? String(aPack.date) : null;
         rate = await resolveRate(dataDate);
@@ -473,39 +668,75 @@
           rate = lastDay.rate;
           dataDate = String(lastDay.date || '').replace(/-/g, '');
           rows = (lastDay.points || []).map(function (p) {
-            return { t: p.t, pct: p.a, bPct: p.b };
+            return { t: p.t, pct: p.a, bPct: p.b, cPct: (p.c == null ? null : p.c) };
           });
         }
       }
 
       // ---- 渲染 ----
       state.rows = rows;
-      state.ratePct = rate ? rate.rate : null;
+      state.rate = rate;
 
       if (rate) {
         setText('rateText', rate.rate.toFixed(2) + '%（' + rate.zt + '/' + (rate.zt + rate.zb) + '，基准日 ' + rate.date + '）');
+        setText('fblText', rate.fbl == null ? '--' :
+          rate.fbl.toFixed(2) + '%（' + rate.base + '/' + (rate.base + rate.zb) +
+          '，剔除一字板 ' + rate.oneWord + ' 家，炸板率 ' + rate.zbl.toFixed(2) + '%）');
       } else {
         setText('rateText', '未取到');
+        setText('fblText', '未取到');
       }
 
-      var last = rows.length ? rows[rows.length - 1] : null;
-      if (last && rate) {
+      // 顶部数值统一取「三个输入量都齐」的最后一个点，避免 883918 比分时慢一拍时出现空值。
+      // 若 883918 整段缺失，则退回到只要求 883900 + 上证（此时指数②显示 --）。
+      var lastAll = null, lastAB = null;
+      for (var ri = rows.length - 1; ri >= 0; ri--) {
+        var r0 = rows[ri];
+        if (lastAB === null && r0.pct != null && r0.bPct != null) lastAB = r0;
+        if (r0.pct != null && r0.bPct != null && r0.cPct != null) { lastAll = r0; break; }
+      }
+      var last = lastAll || lastAB;
+
+      // 指数①
+      var vEl = document.getElementById('curValue');
+      var dEl = document.getElementById('curDelta');
+      if (last && rate && rate.rate != null) {
         var cur = metric(rate.rate, last.pct, last.bPct);
-        var vEl = document.getElementById('curValue');
         if (vEl) { vEl.textContent = cur.toFixed(4); vEl.className = 'v ' + cls1(cur); }
-        var dEl = document.getElementById('curDelta');
         if (dEl) {
           var dev = (cur - 1) * 100;
           dEl.textContent = (dev >= 0 ? '+' : '') + dev.toFixed(3) + ' 相对基准';
           dEl.className = 'd ' + cls1(cur);
         }
-        setText('aText', fmtPct(last.pct));
-        setText('shText', fmtPct(last.bPct));
-        setText('lastPoint', last.t);
+      } else {
+        if (vEl) { vEl.textContent = '--'; vEl.className = 'v flat'; }
+        if (dEl) { dEl.textContent = '--'; dEl.className = 'd flat'; }
       }
 
-      // 按当前选中的视图（1日 / 5日）绘制
-      renderMain();
+      // 指数②
+      var v2El = document.getElementById('curValue2');
+      var d2El = document.getElementById('curDelta2');
+      var cur2 = (lastAll && rate && rate.fbl != null) ? metric2(lastAll.cPct, lastAll.pct, rate.fbl) : null;
+      if (cur2 == null) {
+        if (v2El) { v2El.textContent = '--'; v2El.className = 'v flat'; }
+        if (d2El) { d2El.textContent = '--'; d2El.className = 'd flat'; }
+      } else {
+        if (v2El) { v2El.textContent = cur2.toFixed(2); v2El.className = 'v ' + cls2(cur2); }
+        if (d2El) {
+          d2El.textContent = (cur2 >= 0 ? '+' : '') + cur2.toFixed(2) + ' 元/万（0 = 不赚不亏）';
+          d2El.className = 'd ' + cls2(cur2);
+        }
+      }
+
+      if (last) {
+        setText('aText', fmtPct(last.pct));
+        setText('shText', fmtPct(last.bPct));
+        setText('cText', lastAll ? fmtPct(lastAll.cPct) : '--');
+        setText('lastPoint', last.t + (lastAll && lastAll.t !== last.t ? '（883918 到 ' + lastAll.t + '）' : ''));
+      }
+
+      // 按当前选中的视图（1日 / 5日）绘制两张图
+      renderAll();
 
       if (dataDate) {
         setText('quoteTime', dataDate.slice(0, 4) + '-' + dataDate.slice(4, 6) + '-' + dataDate.slice(6, 8));

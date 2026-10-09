@@ -102,30 +102,52 @@ async function getTimeSeries(prefix, code, dateNum) {
   return out;
 }
 
-// 涨停池 / 炸板池家数
-async function getPoolTotal(kind, dateNum) {
+// 涨停池 / 炸板池家数 + 一字板家数
+const POOL_FIELDS = '199112,10,9001,330323,330324,330325,9002,330329,133971,133970,' +
+  '1968584,3475914,9003,9004,3475915,3475916,330326,330327,330328';
+
+async function getPoolStats(kind, dateNum) {
   const api = kind === 'zt' ? 'limit_up_pool' : 'open_limit_pool';
   const url = 'https://data.10jqka.com.cn/dataapi/limit_up/' + api +
-    '?page=1&limit=1&field=199112&filter=HS,GEM2STAR&order_field=330324&order_type=0&date=' + dateNum;
+    '?page=1&limit=200&field=' + POOL_FIELDS +
+    '&filter=HS,GEM2STAR&order_field=330324&order_type=0&date=' + dateNum;
   const text = await fetchText(url, 'https://data.10jqka.com.cn/');
   const d = JSON.parse(text);
-  const total = d && d.data && d.data.page ? d.data.page.total : null;
-  return typeof total === 'number' ? total : null;
+  const data = d && d.data;
+  if (!data || !data.page || typeof data.page.total !== 'number') throw new Error('bad pool response');
+  let oneWord = 0;
+  (data.info || []).forEach(function (x) { if (x.limit_up_type === '一字板') oneWord++; });
+  return { total: data.page.total, oneWord: oneWord };
 }
 
 async function getRate(dateNum) {
-  const zt = await retry(function () { return getPoolTotal('zt', dateNum); }, 1);
-  const zb = (await retry(function () { return getPoolTotal('zb', dateNum); }, 1)) || 0;
-  if (!zt || zt <= 0) return null;
-  const denom = zt + zb;
-  return { date: String(dateNum), zt: zt, zb: zb, rate: denom > 0 ? (zt / denom) * 100 : null };
+  const ztS = await retry(function () { return getPoolStats('zt', dateNum); }, 1);
+  const zbS = (await retry(function () { return getPoolStats('zb', dateNum); }, 1)) || { total: 0 };
+  if (!ztS || !ztS.total || ztS.total <= 0) return null;
+  const zt = ztS.total, zb = zbS.total, ow = ztS.oneWord || 0;
+  const base = zt - ow;
+  const denom0 = zt + zb, denom1 = base + zb;
+  return {
+    date: String(dateNum), zt: zt, zb: zb, oneWord: ow, base: base,
+    rate: denom0 > 0 ? (zt / denom0) * 100 : null,   // 总封板率（指数①）
+    fbl: denom1 > 0 ? (base / denom1) * 100 : null,  // 非一字板封板率（指数②）
+    zbl: denom1 > 0 ? (zb / denom1) * 100 : null
+  };
 }
 
-// 指标值（涨跌幅按「小数口径」参与计算）
+// 指数① 涨停情绪指数（涨跌幅按「小数口径」参与计算）
 //   v = 封板率/100 × (883900涨跌幅% ÷ 100) + 1 + (上证涨跌幅% ÷ 100) ÷ 20
 function computeValue(ratePct, a, b) {
   // 对应 Excel 式 =C3/100*D3+1+E3/20：883900 按小数代入，上证按百分点代入（不除 100）
   return (ratePct / 100) * (a / 100) + 1 + b / 20;
+}
+
+// 指数② 打板收益（元 / 万元本金）
+//   v2 = 100 × ( 883918涨跌幅% × 炸板率 + 883900涨跌幅% × 非一字板封板率 )
+function computeBoardReturn(c, a, fblPct) {
+  if (fblPct == null || !isFinite(fblPct)) return null;
+  const fbl = fblPct / 100, zbl = 1 - fbl;
+  return 100 * (c * zbl + a * fbl);
 }
 
 async function main() {
@@ -148,11 +170,14 @@ async function main() {
     try { rate = await getRate(prevNum); } catch (e) { console.error('  取封板率失败', prevNum, e.message); }
     if (!rate) { console.error('  跳过 ' + dateNum + '（无封板率基准）'); continue; }
 
-    let aSeries = null, bSeries = null;
+    let aSeries = null, bSeries = null, cSeries = null;
     try {
       aSeries = await getTimeSeries('48', '883900', dateNum);
       await sleep(400);
       bSeries = await getTimeSeries('hs', '1A0001', dateNum);
+      await sleep(400);
+      // 883918 历史分时同样不可用（日期被忽略）；取不到就只是没有 v2，不影响 v
+      try { cSeries = await getTimeSeries('48', '883918', dateNum); } catch (e) { cSeries = null; }
     } catch (e) {
       console.error('  跳过 ' + dateNum + '（分时取数失败：' + e.message + '）');
       continue;
@@ -160,23 +185,30 @@ async function main() {
 
     const bMap = {};
     bSeries.forEach(function (x) { bMap[x.t] = x.pct; });
+    const cMap = {};
+    if (cSeries) cSeries.forEach(function (x) { cMap[x.t] = x.pct; });
 
     const points = [];
     aSeries.forEach(function (x) {
       const b = bMap[x.t];
       if (x.pct == null || b == null) return;
+      const c = cMap[x.t];
+      const v2 = (c == null) ? null : computeBoardReturn(c, x.pct, rate.fbl);
       points.push({
         t: x.t,
         v: +computeValue(rate.rate, x.pct, b).toFixed(4),
+        v2: v2 == null ? null : +v2.toFixed(2),
         a: +x.pct.toFixed(3),
-        b: +b.toFixed(3)
+        b: +b.toFixed(3),
+        c: c == null ? null : +c.toFixed(3)
       });
     });
 
     const store = { date: fmtDate(dateNum), rate: rate, points: points, source: 'backfill' };
     fs.writeFileSync(path.join(DATA_DIR, store.date + '.json'), JSON.stringify(store, null, 1));
-    console.log('  ' + store.date + '  ' + points.length + ' 点  封板率 ' + rate.rate.toFixed(2) +
-      '%（' + rate.zt + '/' + (rate.zt + rate.zb) + '，基准日 ' + rate.date + '）');
+    console.log('  ' + store.date + '  ' + points.length + ' 点  总封板率 ' + rate.rate.toFixed(2) +
+      '%（' + rate.zt + '/' + (rate.zt + rate.zb) + '）  非一字板封板率 ' + rate.fbl.toFixed(2) +
+      '%（' + rate.base + '/' + (rate.base + rate.zb) + '，基准日 ' + rate.date + '）');
     await sleep(500);
   }
 
