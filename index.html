@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>涨停情绪指数 · A股短线情绪量化</title>
+<style>
+  :root{
+    --bg:#f4f5f7;
+    --card:#ffffff;
+    --line:#e8eaed;
+    --txt:#1f2329;
+    --sub:#6b7280;
+    --up:#d93025;
+    --down:#0f9d58;
+    --flat:#8a9099;
+    --brand:#2f6bd8;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;}
+  body{
+    background:var(--bg);color:var(--txt);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1240px;margin:0 auto;padding:24px 18px 46px;}
+  header.top{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px;}
+  header.top h1{font-size:22px;margin:0;letter-spacing:.3px;}
+  header.top .sub{font-size:12.5px;color:var(--sub);}
+  header.top .sub code{background:#e9edf3;border-radius:4px;padding:1px 5px;color:#3a4658;}
+
+  .hero{
+    background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:20px 22px;margin:16px 0 14px;display:flex;flex-wrap:wrap;align-items:center;gap:26px;
+    box-shadow:0 1px 2px rgba(16,24,40,.04);
+  }
+  .hero .big{display:flex;align-items:baseline;gap:12px;}
+  .hero .big .v{font-size:46px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.5px;}
+  .hero .big .d{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;}
+  .hero .meta{display:flex;flex-wrap:wrap;gap:6px 26px;font-size:12.5px;color:var(--sub);}
+  .hero .meta b{color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums;}
+  .hero .formula{
+    margin-left:auto;font-size:12px;color:var(--sub);line-height:1.7;
+    border-left:1px solid var(--line);padding-left:22px;
+  }
+  .hero .formula code{background:#f0f1f3;border-radius:4px;padding:1px 5px;color:#404650;}
+
+  .statusbar{
+    display:flex;flex-wrap:wrap;gap:8px 20px;align-items:center;
+    font-size:12.5px;color:var(--sub);
+    background:var(--card);border:1px solid var(--line);border-radius:10px;
+    padding:10px 14px;margin-bottom:18px;
+  }
+  .statusbar b{color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums;}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#c0c4cc;margin-right:6px;vertical-align:1px;}
+  .dot.on{background:var(--down);box-shadow:0 0 0 3px rgba(15,157,88,.15);}
+  .dot.err{background:var(--up);box-shadow:0 0 0 3px rgba(217,48,37,.14);}
+
+  .grid{display:grid;grid-template-columns:1fr;gap:18px;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px 10px;box-shadow:0 1px 2px rgba(16,24,40,.04);}
+  .card h2{font-size:15px;margin:0 0 2px;font-weight:600;display:flex;align-items:center;gap:10px;}
+  .card h2 .hint{font-size:11.5px;font-weight:400;color:var(--sub);}
+  .chart{width:100%;height:300px;}
+  .chart.short{height:280px;}
+
+  .legend{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 0;font-size:12px;color:var(--sub);}
+  .legend span{display:inline-flex;align-items:center;gap:6px;}
+  .legend i{display:inline-block;width:14px;height:3px;border-radius:2px;}
+
+  footer{margin-top:24px;font-size:12px;color:var(--sub);line-height:1.85;}
+  footer code{background:#eceef1;padding:1px 5px;border-radius:4px;font-size:11.5px;color:#404650;}
+  .err-inline{font-size:12px;color:var(--up);margin-top:10px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>涨停情绪指数</h1>
+    <div class="sub">数据源：同花顺公开接口 · 每分钟刷新 · 纯静态</div>
+  </header>
+
+  <div class="hero">
+    <div class="big">
+      <div class="v flat" id="curValue">--</div>
+      <div class="d flat" id="curDelta">--</div>
+    </div>
+    <div class="meta">
+      <span>昨日封板率：<b id="rateText">--</b></span>
+      <span>883900 昨日涨停表现：<b id="aText">--</b></span>
+      <span>上证指数：<b id="shText">--</b></span>
+    </div>
+    <div class="formula">
+      <div><code>值 = 封板率/100 × 涨停表现 + 1 + 上证/20</code></div>
+      <div>涨跌幅以小数代入（如 0.13% → 0.0013）；<b>1.000 为中性基准</b>，越高于 1 表示打板赚钱效应越强</div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span><span class="dot" id="liveDot"></span><span id="liveText">加载中…</span></span>
+    <span>行情时间：<b id="quoteTime">--</b></span>
+    <span>最新记录点：<b id="lastPoint">--</b></span>
+    <span>刷新倒计时：<b id="countdown">--</b> 秒</span>
+    <span>本地时间：<b id="localTime">--</b></span>
+  </div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>当日分时 <span class="hint">实时计算，每分钟刷新</span></h2>
+      <div class="chart" id="chartToday"></div>
+    </section>
+
+    <section class="card">
+      <h2>5 日分时 <span class="hint">最近 5 个交易日叠加对比</span></h2>
+      <div class="chart short" id="chart5d"></div>
+      <div class="legend" id="legend5d"></div>
+    </section>
+  </div>
+
+  <div class="err-inline" id="errBox"></div>
+
+  <footer>
+    <div>· 指标构成：<code>昨日封板率</code> = 同花顺涨停池家数 ÷ (涨停池 + 炸板池)，取最近一个有数据交易日的收盘值；<code>涨停表现</code> = 同花顺 883900「昨日涨停表现」当日实时涨跌幅；<code>上证</code> = 上证指数当日实时涨跌幅。三者均来自同花顺公开行情接口。</div>
+    <div>· 历史数据（5 日图）由仓库内 <code>data/*.json</code> 提供，交易日盘中由 GitHub Actions 每分钟采集一次并自动提交；当日曲线则由浏览器实时直连计算，因此比存档更及时。</div>
+    <div>· y 轴刻度固定 0.025 一档（0.95 / 0.975 / 1.00 / 1.025 / 1.05 …），红色虚线为 <b>1.000</b> 中性基准。</div>
+    <div>· 本页仅为公开数据的展示与整理，不构成任何投资建议。市场有风险，投资需谨慎。</div>
+  </footer>
+</div>
+
+<script src="lib/echarts.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

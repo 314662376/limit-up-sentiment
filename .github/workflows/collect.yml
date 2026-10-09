@@ -1,0 +1,54 @@
+name: collect-sentiment
+
+# 交易日盘中每分钟采集一次「涨停情绪指数」的三个输入量，写入 data/ 并自动提交。
+# 时间用 UTC，对应北京时间 09:25 与 12:55。
+on:
+  schedule:
+    - cron: '25 1 * * 1-5'    # 北京 09:25（早盘，采到 11:30）
+    - cron: '55 4 * * 1-5'    # 北京 12:55（午盘，采到 15:00）
+  workflow_dispatch:          # 支持手动触发，便于验证
+
+permissions:
+  contents: write             # 允许把 data/ 提交回仓库
+
+concurrency:
+  group: collect-sentiment
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 220
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 准备 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 配置 git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 分段采集并提交
+        env:
+          SESSION: ${{ github.event.schedule == '55 4 * * 1-5' && 'pm' || 'am' }}
+        run: |
+          set -u
+          echo "session = $SESSION"
+          # 每轮跑 14 分钟，跑完立即提交，避免长任务中断导致数据丢失
+          for i in $(seq 1 9); do
+            node scripts/collect.js --session="$SESSION" --minutes=14 || true
+            git add data/ || true
+            if ! git diff --staged --quiet; then
+              git commit -m "data: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M') 采集" || true
+              git push || true
+            else
+              echo "本轮无新增数据"
+            fi
+          done
