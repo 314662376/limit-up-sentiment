@@ -308,8 +308,10 @@
     if (lg) {
       lg.innerHTML = days.map(function (d, i) {
         var color = COLORS[i % COLORS.length];
+        var rd = d.rate && d.rate.date ? String(d.rate.date) : '';
+        var rds = rd.length === 8 ? rd.slice(4, 6) + '-' + rd.slice(6, 8) : rd;
         return '<span><i style="background:' + color + '"></i>' + d.date +
-          '　封板率 ' + d.rate.rate.toFixed(2) + '%</span>';
+          '　封板率 ' + d.rate.rate.toFixed(2) + '%（基准 ' + rds + '）</span>';
       }).join('');
     }
   }
