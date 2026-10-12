@@ -743,8 +743,10 @@
       drawToday(state.rows, state.rate ? state.rate.rate : null, n1);
       drawToday2(state.rows, state.rate ? state.rate.fbl : null, n2);
     } else {
-      draw5d(state.days, n1);
-      draw5d2(state.days, n2);
+      // chartDays = 仓库存档 + 当天直连（见 refresh）；缺失时退回存档
+      var ds = (state.chartDays && state.chartDays.length) ? state.chartDays : state.days;
+      draw5d(ds, n1);
+      draw5d2(ds, n2);
     }
     var e1 = document.getElementById('hintMain');
     if (e1) e1.innerHTML = n1.filter(Boolean).join('<br/>');
@@ -832,6 +834,19 @@
           rows.push({ t: x.t, pct: x.pct, bPct: b, cPct: (cMap[x.t] == null ? null : cMap[x.t]) });
         });
         dataDate = aPack.date ? String(aPack.date) : null;
+
+        // 同花顺的已知行为：开盘前调用分时接口，会把「上一交易日的完整分时」
+        // 原样返回、却把 date 标成今天。若不识别，页面会在盘前把昨天的曲线
+        // 当成今天画出（顶部日期还显示今天），属于张冠李戴。
+        // 判据：分时末点的时刻晚于「现在」→ 不可能是当日数据 → 丢弃，改走存档兜底。
+        //   盘前 09:26 末点 15:00 → 丢弃 ✔ ；盘中 10:00 末点 10:00 → 保留 ✔ ；
+        //   午休 11:35 末点 11:30 → 保留 ✔ ；盘后 15:30 末点 15:00 → 保留 ✔
+        var endTick = rows.length ? rows[rows.length - 1].t : null;
+        if (endTick) {
+          var em = parseInt(endTick.slice(0, 2), 10) * 60 + parseInt(endTick.slice(3, 5), 10);
+          var nm = now.getUTCHours() * 60 + now.getUTCMinutes();
+          if (isFinite(em) && em > nm + 2) { rows = []; }
+        }
       } catch (e) {
         rows = [];
       }
@@ -855,6 +870,29 @@
       // ---- 渲染 ----
       state.rows = rows;
       state.rate = rate;
+
+      // 5 日图的数据源 = 仓库存档 + 「当天直连」。
+      // 当天的存档要等收盘后 Actions 才写回仓库，页面不必等它：
+      // 直连已经拿到当天完整分时（收盘后末点即收盘值），直接并进 5 日图，
+      // 当天那根线立刻就有，定时任务跑不跑都不影响阅读。
+      var chartDays = days.slice();
+      if (!archived && rows.length && dataDate && rate) {
+        var dStr = fmtDateNum(dataDate);
+        var dup = false;
+        for (var ci = 0; ci < chartDays.length; ci++) {
+          if (chartDays[ci].date === dStr) { dup = true; break; }
+        }
+        if (!dup) {
+          chartDays.push({
+            date: dStr, rate: rate, live: true,
+            points: rows.map(function (r) {
+              return { t: r.t, a: r.pct, b: r.bPct, c: r.cPct };
+            })
+          });
+        }
+      }
+      if (chartDays.length > DAYS_5D) chartDays = chartDays.slice(-DAYS_5D);
+      state.chartDays = chartDays;
 
       if (rate) {
         var tag = rate.src === 'live' ? '' : '［存档］';
@@ -924,8 +962,13 @@
       }
 
       if (dot) dot.className = 'dot on';
-      setText('liveText', (inSession(now) ? '已连接 · 盘中实时刷新' : '已连接 · 已收盘（当日完整分时）') +
-        (archived ? '　[分时取数失败，暂用存档]' : ''));
+      // 三种状态分开说：盘中（当天数据在跑）/ 盘前（当天还没有数据，显示上一交易日）/ 盘后（当天已收盘，分时是完整的）
+      var dW = now.getUTCDay();
+      var minsNow = now.getUTCHours() * 60 + now.getUTCMinutes();
+      var isPre = (dW >= 1 && dW <= 5) && minsNow < 570;
+      setText('liveText', (inSession(now) ? '已连接 · 盘中实时刷新'
+        : (isPre ? '已连接 · 盘前，显示上一交易日' : '已连接 · 已收盘（当日完整分时）')) +
+        (archived ? '　[暂用最近交易日存档]' : ''));
 
     } catch (e) {
       if (dot) dot.className = 'dot err';
