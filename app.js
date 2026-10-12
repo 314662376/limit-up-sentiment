@@ -322,43 +322,26 @@
     var out = {
       date: today, zt: A, zb: Z, oneWord: oneWord, base: base,
       rate: d0 > 0 ? +(A / d0 * 100).toFixed(4) : null,          // 总封板率（①口径）
-      fbl: d1 > 0 ? +(base / d1 * 100).toFixed(4) : null,        // 非一字板封板率（②口径）
-      zbl: d1 > 0 ? +(Z / d1 * 100).toFixed(4) : null,           // 炸板率 = 100 − 非一字板封板率
-      stamped: hmOf(bjNow()),
-      live: inSession(bjNow())
+      fbl: d1 > 0 ? +(base / d1 * 100).toFixed(4) : null         // 非一字板封板率（②口径）
     };
     todayRateCache = { at: Date.now(), val: out };
     return out;
   }
 
-  // 封板率高 = 情绪强（红）／低 = 情绪弱（绿）；炸板率高反而弱（绿）。三档：≥60 / 40~60 / ≤40
+  // 封板率高 = 情绪强（红）／低 = 情绪弱（绿）。三档：≥60 / 40~60 / ≤40
   function clsRate(p) { return p == null ? 'flat' : (p >= 60 ? 'up' : (p <= 40 ? 'down' : 'flat')); }
-  function clsZbl(p) { return p == null ? 'flat' : (p >= 60 ? 'down' : (p <= 40 ? 'up' : 'flat')); }
   function pctOf(v) { return (v == null || !isFinite(v)) ? '--' : v.toFixed(2) + '%'; }
-  function setCls(id, cls) { var e = document.getElementById(id); if (e) e.className = 'nv ' + cls; }
 
-  function renderToday(t) {
-    if (!t) {
-      setText('nowRate', '--'); setText('nowFbl', '--'); setText('nowZbl', '--');
-      setCls('nowRate', 'flat'); setCls('nowFbl', 'flat'); setCls('nowZbl', 'flat');
-      setText('nowRateSub', '--'); setText('nowFblSub', '--'); setText('nowZblSub', '--');
-      setText('nowZt', '--'); setText('nowZb', '--'); setText('nowOne', '--');
-      setText('nowStamp', '--');
-      setText('nowTag', '今日暂无涨停数据（非交易日 / 尚未开盘）');
-      return;
+  // 把「今日实时封板率」贴在 ①② 两个数值后面：①用总封板率、②用非一字板封板率
+  function renderTodayRate(t) {
+    var items = [['curRate', t ? t.rate : null], ['curRate2', t ? t.fbl : null]];
+    for (var i = 0; i < items.length; i++) {
+      var e = document.getElementById(items[i][0]);
+      if (!e) continue;
+      var v = items[i][1];
+      e.textContent = (v == null) ? '--' : ('封板率 ' + v.toFixed(2) + '%');
+      e.className = 'r ' + clsRate(v);
     }
-    setText('nowRate', pctOf(t.rate)); setCls('nowRate', clsRate(t.rate));
-    setText('nowFbl', pctOf(t.fbl)); setCls('nowFbl', clsRate(t.fbl));
-    setText('nowZbl', pctOf(t.zbl)); setCls('nowZbl', clsZbl(t.zbl));
-
-    var dn0 = t.zt + t.zb, dn1 = t.base + t.zb;
-    setText('nowRateSub', t.zt + ' ÷ ' + dn0 + '（涨停 ÷ 涨停＋炸板）');
-    setText('nowFblSub', t.base + ' ÷ ' + dn1 + '（非一字 ÷ 非一字＋炸板）');
-    setText('nowZblSub', t.zb + ' ÷ ' + dn1 + '（炸板 ÷ 非一字＋炸板）');
-
-    setText('nowZt', t.zt); setText('nowZb', t.zb); setText('nowOne', t.oneWord);
-    setText('nowStamp', t.stamped);
-    setText('nowTag', (t.live ? '盘中实时截面' : '当日已定型截面') + ' · 不参与上方 ①② 公式');
   }
 
   async function loadHistory() {
@@ -1039,10 +1022,10 @@
         setText('lastPoint', last.t + (lastAll && lastAll.t !== last.t ? '（883918 到 ' + lastAll.t + '）' : ''));
       }
 
-      // 今日实时封板率（当日截面，独立于上方 ①②，取不到就显示 --）
+      // 今日实时封板率：贴在 ①② 数值后面（独立于公式，取不到就显示 --）
       var todayLive = null;
       try { todayLive = await fetchTodayRate(); } catch (e) { todayLive = null; }
-      renderToday(todayLive);
+      renderTodayRate(todayLive);
 
       // 按当前选中的视图（1日 / 5日）绘制两张图
       renderAll();
