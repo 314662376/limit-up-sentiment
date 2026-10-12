@@ -62,6 +62,36 @@
   .dot.on{background:var(--down);box-shadow:0 0 0 3px rgba(15,157,88,.15);}
   .dot.err{background:var(--up);box-shadow:0 0 0 3px rgba(217,48,37,.14);}
 
+  /* 今日实时封板率：与上方两个公式无关的「当日截面」观察指标 */
+  .nowbar{
+    background:var(--card);border:1px solid var(--line);border-radius:10px;
+    padding:12px 16px 13px;margin-bottom:14px;
+  }
+  .nowbar .nowhead{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:9px;}
+  .nowbar .nowhead .lab{font-size:13px;font-weight:600;color:var(--txt);}
+  .nowbar .nowhead .tag{
+    font-size:11px;color:var(--sub);background:#f0f1f3;border-radius:4px;padding:2px 7px;
+    font-variant-numeric:tabular-nums;
+  }
+  .nowgrid{display:flex;flex-wrap:wrap;gap:12px 32px;align-items:flex-start;}
+  .nowcell{display:flex;flex-direction:column;gap:2px;min-width:138px;}
+  .nowcell .nv{font-size:26px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums;letter-spacing:-.3px;}
+  .nowcell .nl{font-size:12px;color:var(--txt);}
+  .nowcell .nl em{font-style:normal;color:var(--sub);font-weight:400;}
+  .nowcell .ns{font-size:11.5px;color:var(--sub);font-variant-numeric:tabular-nums;}
+  .nowside{
+    margin-left:auto;display:flex;flex-direction:column;gap:3px;
+    font-size:12px;color:var(--sub);text-align:right;
+  }
+  .nowside b{color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums;}
+  .nowside .quiet{font-size:11px;color:#9aa1ab;max-width:340px;}
+  .nv.up{color:var(--up);}
+  .nv.down{color:var(--down);}
+  .nv.flat{color:var(--flat);}
+  @media (max-width:820px){
+    .nowside{margin-left:0;text-align:left;}
+  }
+
   .viewbar{
     display:flex;flex-wrap:wrap;align-items:center;gap:12px;
     background:var(--card);border:1px solid var(--line);border-radius:10px;
@@ -140,6 +170,35 @@
     <span>本地时间：<b id="localTime">--</b></span>
   </div>
 
+  <div class="nowbar">
+    <div class="nowhead">
+      <span class="lab">今日实时封板率</span>
+      <span class="tag" id="nowTag">加载中…</span>
+    </div>
+    <div class="nowgrid">
+      <div class="nowcell">
+        <div class="nv flat" id="nowRate">--</div>
+        <div class="nl">总封板率 <em>（①口径）</em></div>
+        <div class="ns" id="nowRateSub">--</div>
+      </div>
+      <div class="nowcell">
+        <div class="nv flat" id="nowFbl">--</div>
+        <div class="nl">非一字板封板率 <em>（②口径）</em></div>
+        <div class="ns" id="nowFblSub">--</div>
+      </div>
+      <div class="nowcell">
+        <div class="nv flat" id="nowZbl">--</div>
+        <div class="nl">炸板率 <em>（= 100% − 非一字板封板率）</em></div>
+        <div class="ns" id="nowZblSub">--</div>
+      </div>
+      <div class="nowside">
+        <span>今日涨停 <b id="nowZt">--</b> 家 · 炸板 <b id="nowZb">--</b> 家 · 一字板 <b id="nowOne">--</b> 家</span>
+        <span>抓取时刻 <b id="nowStamp">--</b>（随 60 秒刷新更新）</span>
+        <span class="quiet" id="nowNote">口径与上方公式完全一致，只是把「基准日」换成了「今天」：盘中即可看到当日情绪，不必收盘。</span>
+      </div>
+    </div>
+  </div>
+
   <div class="viewbar">
     <span class="lab">视角</span>
     <div class="tabs" id="viewTabs">
@@ -174,6 +233,8 @@
   <footer>
     <div>· <b>取数口径</b>：涨停池 / 炸板池家数取同花顺 <code>dataapi/limit_up</code>，取「当前曲线所属交易日的前一个交易日」收盘值（<b>页面直连该接口现算</b>，接口不通时回落到仓库 <code>data/*.json</code> 存档）；<code>883900</code>=昨日涨停表现、<code>883918</code>=昨日炸板股、<code>1A0001</code>=上证指数，均为当前交易日的分时涨跌幅。</div>
     <div>· <b>两个封板率</b>：<code>总封板率 = 涨停家数 ÷ (涨停家数 + 炸板家数)</code>（指数①用）；<code>非一字板封板率 = 非一字板涨停家数 ÷ (非一字板涨停家数 + 炸板家数)</code>，其中 <code>非一字板涨停家数 = 涨停家数 − 一字板家数</code>（指数②用，「一字板」按同花顺涨停池的 <code>limit_up_type</code> 判定）。<b>炸板率 = 100% − 非一字板封板率</b>。</div>
+    <div>· <b>今日实时封板率</b>（页面中部的独立区块）：口径与上面两个封板率完全一致，只是把请求日期换成<b>今天</b>——同花顺的涨停池 / 炸板池盘中会实时累加，所以盘中就能看到当日情绪截面，不必等收盘。它<b>不参与 ①② 两个公式</b>（公式里的封板率按定义必须是「昨日」的）。非交易日或当日还没有涨停时显示 <code>--</code>；为避免同花顺在盘前把上一交易日数据挂到今天的日期上，页面会校验池内首封时间是否落在今天，不符则不显示。</div>
+    <div>· <b>指数①下方的「相对基准」</b>：即当前值相对中性基准 <code>1.000</code> 的偏离，按 <code>(值 − 1) × 100</code> 换算成百分点显示（例如 <code>1.0200</code> → <code>+2.000 相对基准</code>）。它只做「偏强 / 偏弱多少」的直观提示，不改变任何公式。</div>
     <div>· <b>y 轴均固定不缩放</b>：①固定在 <b>0.925 ~ 1.075</b>，灰色虚线为 <b>1.000</b> 中性基准；②固定在 <b>−200 ~ 300</b>，灰色虚线为 <b>0</b>。当日分时图的横轴同样固定为完整交易日 09:30–15:00，盘中不随实时数据延长。若有数据点超出固定区间，会被裁掉并在图下方提示。</div>
     <div>· <b>阈值警示（1 日图）</b>：①低于 <b>0.95</b> 的线段标<b style="color:#d93025">红</b>、高于 <b>1.05</b> 的标<b style="color:#0f9d58">绿</b>；②低于 <b>−100</b> 标<b style="color:#d93025">红</b>、高于 <b>200</b> 标<b style="color:#0f9d58">绿</b>。阈值处以虚线标出，越界区域另加淡色背景带；<b>5 日图</b>因靠颜色区分交易日，只保留背景带与阈值虚线，不改线色。</div>
     <div>· <b>5 日图</b>由仓库内 <code>data/*.json</code> 提供，每个交易日收盘后由 GitHub Actions 抓取当日<b>完整分时</b>（241 个点）一次写齐。当日曲线由浏览器直连现算，因此始终比存档更及时。<b>同花顺不提供按日期的历史分时</b>，故 5 日图只能逐交易日累积：①依赖 <code>883900 + 上证</code> 分时（已可回溯）；②还需 <code>883918</code> 分时（无法回溯），因此②的历史曲线从上线当日开始累积。</div>

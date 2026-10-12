@@ -276,6 +276,91 @@
     return null;
   }
 
+  /* ---- 今日实时封板率（当日截面，不参与上方两个公式）----
+   * 与「昨封板率基准」唯一的不同：这里请求的 date 就是今天。
+   * 同花顺的池子在盘中会实时累加当日的涨停 / 炸板家数，
+   * 所以这个数字反映的是「此刻」的截面，收盘后自然收敛为当日终值。
+   * 非交易日 / 节假日 / 尚未有涨停时接口返回 total = 0 → 视为无数据。
+   */
+  var todayRateCache = { at: 0, val: null };
+
+  function ymdOfBJ(d) {
+    return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+  }
+  // Unix 秒 → 北京时间归属日（服务器时间戳统一按北京时间归日）
+  function tsToYmd(sec) {
+    var n = parseInt(sec, 10);
+    if (!isFinite(n)) return null;
+    return ymdOfBJ(new Date((n + 8 * 3600) * 1000));
+  }
+
+  async function fetchTodayRate() {
+    var today = ymdOfBJ(bjNow());
+    if (todayRateCache.val && Date.now() - todayRateCache.at < 20000) return todayRateCache.val;
+
+    var zt = await fetchPool('limit_up_pool', today);
+    await sleep(140);
+    var zb = null;
+    try { zb = await fetchPool('open_limit_pool', today); } catch (e) { zb = null; }
+
+    var A = (zt && zt.page) ? zt.page.total : 0;
+    if (!A) { todayRateCache = { at: Date.now(), val: null }; return null; }
+
+    // 防「张冠李戴」：池子里最新的首封时间必须落在今天，否则不认。
+    // （同花顺在盘前会把上一交易日的数据挂到今天的日期上，和分时接口是同一类行为）
+    var info = zt.info || [], newest = 0;
+    for (var i = 0; i < info.length; i++) {
+      var t0 = parseInt(info[i].first_limit_up_time, 10);
+      if (isFinite(t0) && t0 > newest) newest = t0;
+    }
+    if (newest && tsToYmd(newest) !== today) { todayRateCache = { at: Date.now(), val: null }; return null; }
+
+    var Z = (zb && zb.page) ? zb.page.total : 0;
+    var oneWord = 0;
+    for (var j = 0; j < info.length; j++) { if (info[j].limit_up_type === '一字板') oneWord++; }
+    var base = A - oneWord, d0 = A + Z, d1 = base + Z;
+    var out = {
+      date: today, zt: A, zb: Z, oneWord: oneWord, base: base,
+      rate: d0 > 0 ? +(A / d0 * 100).toFixed(4) : null,          // 总封板率（①口径）
+      fbl: d1 > 0 ? +(base / d1 * 100).toFixed(4) : null,        // 非一字板封板率（②口径）
+      zbl: d1 > 0 ? +(Z / d1 * 100).toFixed(4) : null,           // 炸板率 = 100 − 非一字板封板率
+      stamped: hmOf(bjNow()),
+      live: inSession(bjNow())
+    };
+    todayRateCache = { at: Date.now(), val: out };
+    return out;
+  }
+
+  // 封板率高 = 情绪强（红）／低 = 情绪弱（绿）；炸板率高反而弱（绿）。三档：≥60 / 40~60 / ≤40
+  function clsRate(p) { return p == null ? 'flat' : (p >= 60 ? 'up' : (p <= 40 ? 'down' : 'flat')); }
+  function clsZbl(p) { return p == null ? 'flat' : (p >= 60 ? 'down' : (p <= 40 ? 'up' : 'flat')); }
+  function pctOf(v) { return (v == null || !isFinite(v)) ? '--' : v.toFixed(2) + '%'; }
+  function setCls(id, cls) { var e = document.getElementById(id); if (e) e.className = 'nv ' + cls; }
+
+  function renderToday(t) {
+    if (!t) {
+      setText('nowRate', '--'); setText('nowFbl', '--'); setText('nowZbl', '--');
+      setCls('nowRate', 'flat'); setCls('nowFbl', 'flat'); setCls('nowZbl', 'flat');
+      setText('nowRateSub', '--'); setText('nowFblSub', '--'); setText('nowZblSub', '--');
+      setText('nowZt', '--'); setText('nowZb', '--'); setText('nowOne', '--');
+      setText('nowStamp', '--');
+      setText('nowTag', '今日暂无涨停数据（非交易日 / 尚未开盘）');
+      return;
+    }
+    setText('nowRate', pctOf(t.rate)); setCls('nowRate', clsRate(t.rate));
+    setText('nowFbl', pctOf(t.fbl)); setCls('nowFbl', clsRate(t.fbl));
+    setText('nowZbl', pctOf(t.zbl)); setCls('nowZbl', clsZbl(t.zbl));
+
+    var dn0 = t.zt + t.zb, dn1 = t.base + t.zb;
+    setText('nowRateSub', t.zt + ' ÷ ' + dn0 + '（涨停 ÷ 涨停＋炸板）');
+    setText('nowFblSub', t.base + ' ÷ ' + dn1 + '（非一字 ÷ 非一字＋炸板）');
+    setText('nowZblSub', t.zb + ' ÷ ' + dn1 + '（炸板 ÷ 非一字＋炸板）');
+
+    setText('nowZt', t.zt); setText('nowZb', t.zb); setText('nowOne', t.oneWord);
+    setText('nowStamp', t.stamped);
+    setText('nowTag', (t.live ? '盘中实时截面' : '当日已定型截面') + ' · 不参与上方 ①② 公式');
+  }
+
   async function loadHistory() {
     var res = await fetch('data/index.json?_=' + Date.now());
     if (!res.ok) throw new Error('index.json 读取失败');
@@ -953,6 +1038,11 @@
         setText('cText', lastAll ? fmtPct(lastAll.cPct) : '--');
         setText('lastPoint', last.t + (lastAll && lastAll.t !== last.t ? '（883918 到 ' + lastAll.t + '）' : ''));
       }
+
+      // 今日实时封板率（当日截面，独立于上方 ①②，取不到就显示 --）
+      var todayLive = null;
+      try { todayLive = await fetchTodayRate(); } catch (e) { todayLive = null; }
+      renderToday(todayLive);
 
       // 按当前选中的视图（1日 / 5日）绘制两张图
       renderAll();
