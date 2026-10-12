@@ -276,13 +276,15 @@
     return null;
   }
 
-  /* ---- 今日实时封板率（当日截面，不参与上方两个公式）----
-   * 与「昨封板率基准」唯一的不同：这里请求的 date 就是今天。
-   * 同花顺的池子在盘中会实时累加当日的涨停 / 炸板家数，
-   * 所以这个数字反映的是「此刻」的截面，收盘后自然收敛为当日终值。
-   * 非交易日 / 节假日 / 尚未有涨停时接口返回 total = 0 → 视为无数据。
+  /* ---- 当日封板率（贴在 ①② 数值后面，不参与那两个公式）----
+   * 与「封板率基准」唯一的不同：这里请求的 date 就是「当天」。
+   * 同花顺的池子在盘中会实时累加当日的涨停 / 炸板家数，收盘后定格为当日终值。
+   *
+   * 关键行为：当天还没有数据时（过零点 / 盘前 / 非交易日），
+   * 往前回退到「最近一个有数据的交易日」，把上一次收盘的封板率一直留到次日开盘。
+   * 否则每天一过零点就会变成「--」，既没意义又把版面弄花。
    */
-  var todayRateCache = { at: 0, val: null };
+  var todayRateCache = { at: 0, val: null, fallback: false };
 
   function ymdOfBJ(d) {
     return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
@@ -294,38 +296,54 @@
     return ymdOfBJ(new Date((n + 8 * 3600) * 1000));
   }
 
-  async function fetchTodayRate() {
-    var today = ymdOfBJ(bjNow());
-    if (todayRateCache.val && Date.now() - todayRateCache.at < 20000) return todayRateCache.val;
-
-    var zt = await fetchPool('limit_up_pool', today);
+  // 取「某一天」的封板率；该日无数据（total = 0）时返回 null
+  async function fetchRateOn(dateNum) {
+    var zt = await fetchPool('limit_up_pool', dateNum);
     await sleep(140);
     var zb = null;
-    try { zb = await fetchPool('open_limit_pool', today); } catch (e) { zb = null; }
+    try { zb = await fetchPool('open_limit_pool', dateNum); } catch (e) { zb = null; }
 
     var A = (zt && zt.page) ? zt.page.total : 0;
-    if (!A) { todayRateCache = { at: Date.now(), val: null }; return null; }
+    if (!A) return null;
 
-    // 防「张冠李戴」：池子里最新的首封时间必须落在今天，否则不认。
+    // 防「张冠李戴」：池子里最新的首封时间必须落在该日，否则不认。
     // （同花顺在盘前会把上一交易日的数据挂到今天的日期上，和分时接口是同一类行为）
     var info = zt.info || [], newest = 0;
     for (var i = 0; i < info.length; i++) {
       var t0 = parseInt(info[i].first_limit_up_time, 10);
       if (isFinite(t0) && t0 > newest) newest = t0;
     }
-    if (newest && tsToYmd(newest) !== today) { todayRateCache = { at: Date.now(), val: null }; return null; }
+    if (newest && tsToYmd(newest) !== dateNum) return null;
 
     var Z = (zb && zb.page) ? zb.page.total : 0;
     var oneWord = 0;
     for (var j = 0; j < info.length; j++) { if (info[j].limit_up_type === '一字板') oneWord++; }
     var base = A - oneWord, d0 = A + Z, d1 = base + Z;
-    var out = {
-      date: today, zt: A, zb: Z, oneWord: oneWord, base: base,
+    return {
+      date: dateNum, zt: A, zb: Z, oneWord: oneWord, base: base,
       rate: d0 > 0 ? +(A / d0 * 100).toFixed(4) : null,          // 总封板率（①口径）
       fbl: d1 > 0 ? +(base / d1 * 100).toFixed(4) : null         // 非一字板封板率（②口径）
     };
-    todayRateCache = { at: Date.now(), val: out };
-    return out;
+  }
+
+  async function fetchTodayRate() {
+    var today = ymdOfBJ(bjNow());
+    // 当日实时数据 55 秒过期（刷新间隔 60 秒）；
+    // 回退数据 5 分钟过期——盘前 / 非交易日它本来就不会变，没必要每分钟重问一遍。
+    var ttl = todayRateCache.fallback ? 5 * 60 * 1000 : 55000;
+    if (todayRateCache.val && Date.now() - todayRateCache.at < ttl) return todayRateCache.val;
+
+    var r = await fetchRateOn(today);
+    var fb = false;
+    if (!r) {
+      // 当天还没有数据 → 往前找最近一个有数据的交易日（跨周末最多 3 步，10 步是保险上限）
+      for (var back = 1; back <= 10; back++) {
+        var rr = await fetchRateOn(shiftYmd(today, -back));
+        if (rr) { r = rr; fb = true; break; }
+      }
+    }
+    todayRateCache = { at: Date.now(), val: r, fallback: fb };
+    return r;
   }
 
   // 封板率高 = 情绪强（红）／低 = 情绪弱（绿）。三档：≥60 / 40~60 / ≤40
