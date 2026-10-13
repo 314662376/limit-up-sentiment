@@ -148,12 +148,36 @@
     });
   }
 
+  /* 分时接口是 JSONP（外面包了一层 callback）。以前用 <script> 标签加载，
+   * 但该接口带 `Cache-Control: max-age=60`，浏览器会拿本地缓存，
+   * 于是出现过「曲线停在某一分钟不再前进」的现象。
+   * 现在改成 fetch + `cache:'no-store'`，让浏览器每次都真去取；
+   * 万一 fetch 被跨域策略挡住（老浏览器 / 兼容模式），再退回 <script> 方式。
+   *
+   * 注意：不能给 fetch 加 `Cache-Control` / `Pragma` 请求头——
+   * 它们不在 CORS 安全名单里，会触发预检，而对方
+   * `Access-Control-Allow-Headers` 里没有这两个，反而会把请求搞挂。
+   */
+  async function fetchJsonp(url, cbName) {
+    var fresh = url + (url.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now();
+    try {
+      var r = await fetch(fresh, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      var txt = await r.text();
+      var i = txt.indexOf('('), j = txt.lastIndexOf(')');
+      if (i < 0 || j <= i) throw new Error('JSONP 格式异常');
+      return JSON.parse(txt.slice(i + 1, j));
+    } catch (e) {
+      return await jsonp(url, cbName);      // 兜底
+    }
+  }
+
   /* ==================== 取数 ==================== */
   async function getTimeSeries(cbKey, prefix, code, dateNum) {
     var suffix = dateNum ? ('/' + dateNum) : '/last';
     var cb = 'quotebridge_v6_time_' + prefix + '_' + code + (dateNum ? ('_' + dateNum) : '_last');
     var url = BASE + '/v6/time/' + prefix + '_' + code + suffix + '.js';
-    var d = await jsonp(url, cb);
+    var d = await fetchJsonp(url, cb);
     var pack = d[prefix + '_' + code];
     if (!pack || !pack.data) throw new Error('无分时数据 ' + code);
     var pre = parseFloat(pack.pre);
@@ -1057,9 +1081,18 @@
       var dW = now.getUTCDay();
       var minsNow = now.getUTCHours() * 60 + now.getUTCMinutes();
       var isPre = (dW >= 1 && dW <= 5) && minsNow < 570;
+
+      // 数据末点比当前时间落后 3 分钟以上 → 直接写明「数据停在几点」，
+      // 免得页面看着在刷新、其实曲线没动（浏览器缓存 / 网络中间层都会造成）。
+      var staleTxt = '';
+      if (last && inSession(now)) {
+        var lm = parseInt(last.t.slice(0, 2), 10) * 60 + parseInt(last.t.slice(3, 5), 10);
+        if (isFinite(lm) && minsNow - lm >= 3) staleTxt = '　⚠ 数据停在 ' + last.t;
+      }
+
       setText('liveText', (inSession(now) ? '已连接 · 盘中实时刷新'
         : (isPre ? '已连接 · 盘前，显示上一交易日' : '已连接 · 已收盘（当日完整分时）')) +
-        (archived ? '　[暂用最近交易日存档]' : ''));
+        (archived ? '　[暂用最近交易日存档]' : '') + staleTxt);
 
     } catch (e) {
       if (dot) dot.className = 'dot err';
@@ -1087,4 +1120,15 @@
   bindTabs();
   refresh();
   setInterval(tick, 1000);
+
+  // 标签页切到后台时浏览器会节流甚至冻结 setInterval，
+  // 切回来就会看到「本地时间在走、数据却停在几分钟前」。重新可见时立刻补一次刷新，
+  // 不必再干等满一个 60 秒周期。
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) return;
+    left = 0;
+    setText('countdown', '—');
+    refresh();
+  });
+  window.addEventListener('online', function () { left = 0; refresh(); });
 })();
