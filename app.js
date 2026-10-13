@@ -73,6 +73,72 @@
     '13:00': 1, '13:30': 1, '14:00': 1, '14:30': 1, '15:00': 1
   };
 
+  /* ============================================================
+   * 5 日图横轴：5 个交易日「按顺序连续铺开」
+   *   每天占 DAY_TICKS.length 个刻度（共 5×242），而不是把 5 天
+   *   折回同一个 09:30–15:00 的日内轴上叠着画。
+   *
+   * 为什么刻度名必须带日期前缀：category 轴是按「名字」匹配数据的。
+   * 若 5 天都用 '09:30' 这种名字，ECharts 会把相同名字归并成同一个
+   * x 位置 → 5 天的曲线全部叠在一起，正是要改掉的那个效果。
+   * 所以刻度名统一为 '1008|09:30' 这种「MMDD|HH:MM」，全局唯一。
+   * ============================================================ */
+  var DAY_LABELS_5D = { '10:30': 1, '13:30': 1, '15:00': 1 };
+
+  // '2026-10-08' / '20261008' → '1008'
+  function mmddOf(d) {
+    var s = String(d == null ? '' : d).replace(/-/g, '');
+    if (s.length >= 8) return s.slice(4, 8);
+    return s.length === 4 ? s : '';
+  }
+  function dashMMDD(m) { return m.length === 4 ? m.slice(0, 2) + '-' + m.slice(2) : m; }
+  // '20260930' → '09-30'（图例里标注「基准日」用）
+  function fmtBaseDay(n) {
+    var s = String(n == null ? '' : n);
+    return s.length === 8 ? s.slice(4, 6) + '-' + s.slice(6, 8) : s;
+  }
+
+  // 构造 5 日连续刻度；start[i] = 第 i 天在刻度数组里的起始下标
+  function build5dTicks(days) {
+    var a = [], start = [];
+    days.forEach(function (day) {
+      start.push(a.length);
+      var p = mmddOf(day.date);
+      for (var i = 0; i < DAY_TICKS.length; i++) a.push(p + '|' + DAY_TICKS[i]);
+    });
+    return { ticks: a, start: start };
+  }
+
+  // 5 日横轴标签：每天开盘处标「日期」，其余只标少数时刻（5×242 个标签会糊成一片）
+  function label5dOf(v) {
+    var s = String(v), i = s.indexOf('|');
+    if (i < 0) return null;
+    var m = s.slice(0, i), t = s.slice(i + 1);
+    if (t === '09:30') return { text: dashMMDD(m), date: true };
+    if (DAY_LABELS_5D[t]) return { text: t, date: false };
+    return null;
+  }
+
+  // '1008|09:30' → '10-08 09:30'（tooltip 用）
+  function fmtKey5d(v) {
+    var s = String(v), i = s.indexOf('|');
+    if (i < 0) return s;
+    return dashMMDD(s.slice(0, i)) + ' ' + s.slice(i + 1);
+  }
+
+  // 交易日之间的竖向分隔虚线（挂到 series[0] 的 markLine 上，与阈值虚线一起渲染）
+  function daySepLines5d(ticks, start) {
+    var out = [];
+    for (var i = 1; i < start.length; i++) {
+      out.push({
+        xAxis: ticks[start[i]],
+        lineStyle: { color: '#c9ced6', type: 'dotted', width: 1, opacity: .9 },
+        label: { show: false }
+      });
+    }
+    return out;
+  }
+
   // 超出固定 y 轴区间的点数（区间是硬约束，超出的点会被裁掉，用提示兜底）
   function countOut(values, min, max) {
     var n = 0;
@@ -432,23 +498,42 @@
     };
   }
 
-  function baseXAxis(xs, isDay) {
+  // 1 日图横轴：固定为完整交易日的 242 个分钟刻度
+  function baseXAxisDay() {
     return {
       type: 'category',
-      data: xs,
+      data: DAY_TICKS,
       boundaryGap: false,
       axisLine: { lineStyle: { color: '#dfe2e7' } },
       axisTick: { show: false },
-      axisLabel: isDay
-        ? {
-          color: '#9aa1ab', fontSize: 10,
-          // 固定刻度下只保留整/半小时，避免 242 个标签互相压叠
-          interval: function (i, v) { return !!DAY_LABELS[v]; }
-        }
-        : {
-          color: '#9aa1ab', fontSize: 10,
-          interval: xs.length ? Math.max(0, Math.ceil(xs.length / 8) - 1) : 0
-        }
+      axisLabel: {
+        color: '#9aa1ab', fontSize: 10,
+        // 固定刻度下只保留整/半小时，避免 242 个标签互相压叠
+        interval: function (i, v) { return !!DAY_LABELS[v]; }
+      }
+    };
+  }
+
+  // 5 日图专用横轴：刻度 = 5 天连续铺开的 'MMDD|HH:MM'
+  function baseXAxis5d(ticks) {
+    return {
+      type: 'category',
+      data: ticks,
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: '#dfe2e7' } },
+      axisTick: { show: false },
+      axisLabel: {
+        color: '#9aa1ab', fontSize: 10,
+        // 用 interval 过滤：5×242 个刻度里只留每天 4 个（开盘日 + 10:30/13:30/15:00）
+        interval: function (i, v) { return !!label5dOf(v); },
+        formatter: function (v) {
+          var o = label5dOf(v);
+          if (!o) return '';
+          // 日期加粗突出，便于一眼分辨「这一段是哪个交易日」
+          return o.date ? '{d|' + o.text + '}' : o.text;
+        },
+        rich: { d: { color: '#4b5563', fontSize: 10, fontWeight: 'bold' } }
+      }
     };
   }
 
@@ -558,7 +643,7 @@
             '<br/>上证 ' + fmtPct(p.bPct);
         }
       },
-      xAxis: baseXAxis(DAY_TICKS, true),
+      xAxis: baseXAxisDay(),
       yAxis: baseYAxis(Y_MIN, Y_MAX, Y_STEP, 3),
       visualMap: zoneVisualMap(1, TH1_LO, TH1_HI, '#2f6bd8'),
       series: [{
@@ -583,25 +668,37 @@
     }
   }
 
+  /* 5 日视图：横轴 = 最近 5 个交易日「按顺序连续铺开」。
+   *   每天占 DAY_TICKS.length 个刻度，整条曲线自左向右依次是 D-4 → D。
+   *   每天仍是独立颜色的一段线（各自取所属交易日的基准），相邻两天之间用竖向虚线分隔。 */
   function draw5d(days, notices) {
     var c = getChart('chartMain');
     if (!c) return;
-    var set = {}, allX = [];
-    var series = [];
-    var allV = [];
+    var lg = document.getElementById('legendMain');
+    if (lg) lg.innerHTML = '';
+
+    var ax = build5dTicks(days);
+    var series = [], allV = [], used = [];
 
     days.forEach(function (day, i) {
       var color = COLORS[i % COLORS.length];
-      var pts = (day.points || []).map(function (p) {
-        var v = metric(day.rate.rate, p.a, p.b);
+      var mmdd = mmddOf(day.date);
+      var base = (day.rate && day.rate.rate != null) ? day.rate.rate : null;
+      var baseDate = (day.rate && day.rate.date) ? String(day.rate.date) : '';
+      var pts = [];
+      (day.points || []).forEach(function (p) {
+        if (base == null || p.a == null || !DAY_TICK_SET[p.t]) return;
+        var v = metric(base, p.a, p.b);
+        if (!isFinite(v)) return;
         allV.push(v);
-        if (!set[p.t]) { set[p.t] = 1; allX.push(p.t); }
-        return [p.t, +v.toFixed(5)];
+        pts.push([mmdd + '|' + p.t, +v.toFixed(5)]);
       });
+      used.push({ date: day.date, mmdd: mmdd, base: base, baseDate: baseDate, color: color });
+      if (!pts.length) return;                 // 该日无可用点就不建系列
       // 初期某天可能只有 1-2 个点：此时连线画不出来，至少把点标出来，避免「图例有、图上没有」
       var few = pts.length < 2;
       var s = {
-        name: day.date,
+        name: dashMMDD(mmdd),
         type: 'line',
         data: pts,
         symbol: few ? 'circle' : 'none',
@@ -612,25 +709,24 @@
         itemStyle: { color: color }
       };
       // 5 日图靠颜色区分「哪一天」，所以不按阈值改线色，
-      // 只用背景警示带 + 阈值虚线表达「跌破 / 涨破」——挂在第一条线上，避免重复渲染。
+      // 只用背景警示带 + 阈值虚线表达「跌破 / 涨破」；
+      // 竖向的「日分隔线」并进同一条 markLine，避免在多条线上重复渲染。
       if (!series.length) {
         s.markArea = dangerZones(Y_MIN, Y_MAX, TH1_LO, TH1_HI);
-        s.markLine = badgeLines([
+        var ml = badgeLines([
           { y: Y_BASE, label: '1.000', color: C_BASE },
           { y: TH1_LO, label: TH1_LO.toFixed(3), color: C_RED },
           { y: TH1_HI, label: TH1_HI.toFixed(3), color: C_GREEN }
         ]);
+        ml.data = ml.data.concat(daySepLines5d(ax.ticks, ax.start));
+        s.markLine = ml;
       }
       series.push(s);
     });
 
-    allX.sort();
-
     if (!series.length) {
       c.clear();
-      var lg0 = document.getElementById('legendMain');
-      if (lg0) lg0.innerHTML = '';
-      notices.push('历史数据积累中：暂无任何交易日存档，5 日图将在 GitHub Actions 采集后出现。');
+      notices.push('历史数据积累中：暂无任何交易日存档，5 日图将在采集任务跑过之后出现。');
       return;
     }
 
@@ -644,33 +740,32 @@
         textStyle: { color: '#1f2329', fontSize: 12 },
         formatter: function (ps) {
           if (!ps || !ps.length) return '';
-          var out = [ps[0].axisValue];
+          var out = ['<b>' + fmtKey5d(ps[0].axisValue) + '</b>'];
           ps.forEach(function (it) {
             if (it.data == null) return;
-            out.push(it.marker + it.seriesName + ' <b>' + Number(it.data[1]).toFixed(4) + '</b>');
+            var v = Number(it.data[1]);
+            if (!isFinite(v)) return;
+            out.push(it.marker + it.seriesName + ' <b>' + v.toFixed(4) + '</b>');
           });
-          return out.join('<br/>');
+          return out.length > 1 ? out.join('<br/>') : '';
         }
       },
-      xAxis: baseXAxis(allX),
+      xAxis: baseXAxis5d(ax.ticks),
       yAxis: baseYAxis(Y_MIN, Y_MAX, Y_STEP, 3),
       series: series
     }, true);
 
-    var lg = document.getElementById('legendMain');
     if (lg) {
-      lg.innerHTML = days.map(function (d, i) {
-        var color = COLORS[i % COLORS.length];
-        var rd = d.rate && d.rate.date ? String(d.rate.date) : '';
-        var rds = rd.length === 8 ? rd.slice(4, 6) + '-' + rd.slice(6, 8) : rd;
-        return '<span><i style="background:' + color + '"></i>' + d.date +
-          '　封板率 ' + d.rate.rate.toFixed(2) + '%（基准 ' + rds + '）</span>';
+      lg.innerHTML = used.map(function (u) {
+        return '<span><i style="background:' + u.color + '"></i>' + u.date +
+          '　封板率 ' + (u.base == null ? '--' : u.base.toFixed(2) + '%') +
+          '（基准 ' + fmtBaseDay(u.baseDate) + '）</span>';
       }).join('');
     }
 
-    if (days.length < 2) {
-      notices.push('历史数据积累中：目前仅 ' + days.length + ' 个交易日。同花顺接口不提供按日期的历史分时，' +
-        '5 日图由 GitHub Actions 每个交易日自动追加一条曲线。');
+    if (used.length < 2) {
+      notices.push('历史数据积累中：目前仅 ' + used.length + ' 个交易日。同花顺接口不提供按日期的历史分时，' +
+        '5 日图由采集任务每个交易日自动追加一段。');
     }
 
     var over5 = countOut(allV, Y_MIN, Y_MAX);
@@ -721,7 +816,7 @@
             '<br/>883918 ' + fmtPct(p.cPct);
         }
       },
-      xAxis: baseXAxis(DAY_TICKS, true),
+      xAxis: baseXAxisDay(),
       yAxis: baseYAxis(Y2_MIN, Y2_MAX, Y2_STEP, 0),
       visualMap: zoneVisualMap(1, TH2_LO, TH2_HI, '#e08a1e'),
       series: [{
@@ -746,50 +841,52 @@
     }
   }
 
+  /* 指数②的 5 日视图：横轴口径与 draw5d 完全一致（5 天按顺序连续铺开、日间竖虚线分隔） */
   function draw5d2(days, notices) {
     var c = getChart('chart2');
     if (!c) return;
-    var set = {}, allX = [], series = [], allV = [];
-    var used = [];
+    var lg = document.getElementById('legend2');
+    if (lg) lg.innerHTML = '';
+
+    var ax = build5dTicks(days);
+    var series = [], allV = [], used = [];
 
     days.forEach(function (day, i) {
       var fbl = day.rate && day.rate.fbl;
       if (fbl == null || !isFinite(fbl)) return;             // 该日缺「非一字板封板率」基准
       var color = COLORS[i % COLORS.length];
+      var mmdd = mmddOf(day.date);
       var pts = [];
       (day.points || []).forEach(function (p) {
-        if (p.c == null) return;                              // 缺 883918 的点跳过
+        if (p.c == null || !DAY_TICK_SET[p.t]) return;        // 缺 883918 的点跳过
         var v = metric2(p.c, p.a, fbl);
         if (v == null) return;
         allV.push(v);
-        if (!set[p.t]) { set[p.t] = 1; allX.push(p.t); }
-        pts.push([p.t, +v.toFixed(2)]);
+        pts.push([mmdd + '|' + p.t, +v.toFixed(2)]);
       });
       if (!pts.length) return;                                // 完全没有可用点就不画（避免空图例）
       used.push({ date: day.date, fbl: fbl, color: color });
       var few = pts.length < 2;
       var s2 = {
-        name: day.date, type: 'line', data: pts,
+        name: dashMMDD(mmdd), type: 'line', data: pts,
         symbol: few ? 'circle' : 'none', symbolSize: few ? 6 : 0, showSymbol: few,
         smooth: false, lineStyle: { width: 1.5, color: color }, itemStyle: { color: color }
       };
       if (!series.length) {
         s2.markArea = dangerZones(Y2_MIN, Y2_MAX, TH2_LO, TH2_HI);
-        s2.markLine = badgeLines([
+        var ml2 = badgeLines([
           { y: Y2_BASE, label: '0', color: C_BASE },
           { y: TH2_LO, label: String(TH2_LO), color: C_RED },
           { y: TH2_HI, label: String(TH2_HI), color: C_GREEN }
         ]);
+        ml2.data = ml2.data.concat(daySepLines5d(ax.ticks, ax.start));
+        s2.markLine = ml2;
       }
       series.push(s2);
     });
 
-    allX.sort();
-    var lg = document.getElementById('legend2');
-
     if (!series.length) {
       c.clear();
-      if (lg) lg.innerHTML = '';
       notices.push('打板收益的 5 日图需要同时具备「非一字板封板率」和 883918 分时，' +
         '而 883918 历史分时不可获取，只能从本指标上线当天起逐日累积。');
       return;
@@ -805,15 +902,17 @@
         textStyle: { color: '#1f2329', fontSize: 12 },
         formatter: function (ps) {
           if (!ps || !ps.length) return '';
-          var out = [ps[0].axisValue];
+          var out = ['<b>' + fmtKey5d(ps[0].axisValue) + '</b>'];
           ps.forEach(function (it) {
             if (it.data == null) return;
-            out.push(it.marker + it.seriesName + ' <b>' + Number(it.data[1]).toFixed(2) + '</b>');
+            var v = Number(it.data[1]);
+            if (!isFinite(v)) return;
+            out.push(it.marker + it.seriesName + ' <b>' + v.toFixed(2) + '</b>');
           });
-          return out.join('<br/>');
+          return out.length > 1 ? out.join('<br/>') : '';
         }
       },
-      xAxis: baseXAxis(allX),
+      xAxis: baseXAxis5d(ax.ticks),
       yAxis: baseYAxis(Y2_MIN, Y2_MAX, Y2_STEP, 0),
       series: series
     }, true);
@@ -846,6 +945,10 @@
   })();
   var state = { rows: [], rate: null, days: [] };
 
+  var HINT_1D = '实时计算，每分钟刷新；横轴固定为完整交易日 09:30–15:00';
+  var HINT_5D = '最近 5 个交易日按顺序连续铺开：横轴跨 5 天，日内仍是分钟粒度；'
+    + '每天取「所属交易日的前一交易日」封板率作基准，日与日之间以竖虚线分隔';
+
   function renderAll() {
     var n1 = [], n2 = [];
     var isDay = (VIEW === '1d');
@@ -873,7 +976,7 @@
     });
     var hint0 = document.getElementById('viewHint');
     if (hint0 && VIEW === '5d') {
-      hint0.textContent = '最近 5 个交易日叠加对比（每张图各自取所属交易日的基准）';
+      hint0.textContent = HINT_5D;
     }
     box.addEventListener('click', function (e) {
       var b = e.target.closest ? e.target.closest('button[data-v]') : null;
@@ -886,9 +989,7 @@
       });
       var hint = document.getElementById('viewHint');
       if (hint) {
-        hint.textContent = (v === '1d')
-          ? '实时计算，每分钟刷新；横轴固定为完整交易日 09:30–15:00'
-          : '最近 5 个交易日叠加对比（每张图各自取所属交易日的基准）';
+        hint.textContent = (v === '1d') ? HINT_1D : HINT_5D;
       }
       renderAll();
     });
