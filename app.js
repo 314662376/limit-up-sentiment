@@ -1138,9 +1138,11 @@
           dEl.textContent = (dev >= 0 ? '+' : '') + dev.toFixed(3) + ' 相对基准';
           dEl.className = 'd ' + cls1(cur);
         }
+        setTitleValue(cur);          // 同步到标签栏（后台也能瞄到当前值）
       } else {
         if (vEl) { vEl.textContent = '--'; vEl.className = 'v flat'; }
         if (dEl) { dEl.textContent = '--'; dEl.className = 'd flat'; }
+        setTitleValue(null);
       }
 
       // 指数②
@@ -1205,13 +1207,75 @@
     }
   }
 
+  /* ---- 标签页标题显示实时指标 ----
+   * 后台标签页看不到内容，但标签栏上的文字看得见。把①的当前值写进 title，
+   * 切去别的标签也能瞄一眼，不必切回来。取不到数时还原成原标题。 */
+  var TITLE_ORIG = document.title;
+  function setTitleValue(cur) {
+    if (cur == null || !isFinite(cur)) { document.title = TITLE_ORIG; return; }
+    // ▲/▼/＝ 只是方向标记：标签栏没法着色，用符号补上「红涨绿跌」缺失的信息
+    var mark = cur > 1.0000001 ? '▲' : (cur < 0.9999999 ? '▼' : '＝');
+    document.title = cur.toFixed(4) + ' ' + mark + ' · 打板情绪看板';
+  }
+
+  /* ---- 后台不被节流的 1 秒心跳 ----
+   * 主线程的 setInterval 在后台标签页会被强制放慢：
+   *   隐藏 <5 分钟 → 最快 1 秒一次；隐藏 >5 分钟且是链式定时器 → 每分钟才检查一次。
+   * 这是 HTML 规范里的主动节流（为了省电），前端改不掉。
+   * 但规范**明确豁免了 Web Worker 内部的定时器**（Worker 在独立线程，不参与主线程节流），
+   * 于是把心跳搬进 Worker：后台也能按 60 秒的节奏取数，切回来的第一帧就已经是新数据。
+   * 注意：Worker 只能用 blob: URL 创建，file:// 协议或严格 CSP 下会失败 → 回退主线程 setInterval。
+   */
+  function startHeartbeat(onBeat) {
+    var worker = null, fallbackId = null, beat = false;
+    function hit() { beat = true; onBeat(); }
+    function toFallback(why) {
+      if (fallbackId) return;
+      try { if (worker) worker.terminate(); } catch (e) { /* 忽略 */ }
+      worker = null;
+      fallbackId = setInterval(hit, 1000);
+      try {
+        console.info('[心跳] 回退主线程 setInterval（' + why + '）——后台标签页会被浏览器放慢');
+      } catch (e) { /* 忽略 */ }
+    }
+    try {
+      var code = 'var id = setInterval(function () { postMessage(1); }, 1000);' +
+        'self.onmessage = function (e) { if (e.data === "stop") clearInterval(id); };';
+      var url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+      worker = new Worker(url);
+      worker.onmessage = hit;
+      worker.onerror = function () { toFallback('Worker onerror'); };
+      // 3 秒还没收到一次心跳 → 说明 Worker 没跑起来，直接换主线程（有些环境 onerror 不触发）
+      setTimeout(function () {
+        if (!beat) { toFallback('3 秒内没有心跳'); return; }
+        try { console.info('[心跳] 使用 Web Worker（后台标签页不被节流）'); } catch (e) { /* 忽略 */ }
+      }, 3000);
+    } catch (e) {
+      toFallback('Worker 创建失败：' + e.message);
+    }
+    return function stop() {
+      if (worker) { try { worker.postMessage('stop'); worker.terminate(); } catch (e) {} }
+      if (fallbackId) clearInterval(fallbackId);
+    };
+  }
+
+  /* ---- 每秒心跳：走本地时钟 + 倒计时 ---- */
+  var lastBeatAt = 0;
   function tick() {
     var now = bjNow();
     setText('localTime', hmOf(now) + ':' + pad(now.getUTCSeconds()) + ' · ' + phaseText(now));
-    left -= 1;
+
+    // 按「真实经过的秒数」递减，而不是无脑 -1：
+    // 标签被冻结、电脑睡眠、或者心跳本身被拖慢时，回来会一次性补齐，
+    // 不会出现「明明过了 10 分钟，倒计时却只从 60 掉到 59」。
+    var t = Date.now();
+    var dt = lastBeatAt ? Math.max(0, Math.round((t - lastBeatAt) / 1000)) : 1;
+    lastBeatAt = t;
+
+    left -= dt;
     if (left <= 0) {
       setText('countdown', '—');
-      refresh();
+      refresh();                 // busy 时内部会自行挡掉，不会叠加请求
     } else {
       setText('countdown', left);
     }
@@ -1220,16 +1284,18 @@
   /* ==================== 启动 ==================== */
   bindTabs();
   refresh();
-  setInterval(tick, 1000);
+  var stopHeartbeat = startHeartbeat(tick);
 
-  // 标签页切到后台时浏览器会节流甚至冻结 setInterval，
-  // 切回来就会看到「本地时间在走、数据却停在几分钟前」。重新可见时立刻补一次刷新，
-  // 不必再干等满一个 60 秒周期。
+  // 兜底一：切回前台立刻补一次刷新，不必干等满一个 60 秒周期。
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) return;
     left = 0;
+    lastBeatAt = 0;
     setText('countdown', '—');
     refresh();
   });
-  window.addEventListener('online', function () { left = 0; refresh(); });
+  // 兜底二：断网恢复后立刻重试
+  window.addEventListener('online', function () { left = 0; lastBeatAt = 0; refresh(); });
+  // 页面卸载时收掉 Worker / 定时器，避免残留
+  window.addEventListener('beforeunload', function () { stopHeartbeat(); });
 })();
