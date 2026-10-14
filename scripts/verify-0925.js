@@ -195,16 +195,19 @@ function until(cond, ms) {
     '横轴 = ' + opt.xAxis.data.length + ' 个刻度，首个是 ' + opt.xAxis.data[0]);
 
   console.log('\n[5] 今日封板率（09:25 全靠涨停池家数）');
-  ok(/封板率 100\.00%/.test(els['curRate'].textContent),
-    '总封板率 = ' + els['curRate'].textContent + '（10 家全是一字板）');
-  ok(els['curRate2'].textContent === '--',
-    '② 的非一字板封板率 = ' + els['curRate2'].textContent + '（非一字板涨停 0 家，分母为 0，本就该是 --）');
+  // ①② 现在统一挂「今日非一字板封板率」。09:25 这 10 家全是一字板 → 非一字板 0 家，
+  // 分母为 0 算不出来，所以两边都该是 --（这是新口径下必然的结果，不是 bug）。
+  ok(els['curRate'].textContent === '--' && els['curRate2'].textContent === '--',
+    '①② 后挂的都是今日非一字板封板率 = ' + els['curRate'].textContent + ' / ' + els['curRate2'].textContent +
+    '（10 家全是一字板，非一字板 0 家 → 分母为 0，本就该是 --）');
 
   console.log('\n[6] 悬停提示里写明了算式，并区分「今日」与「昨日」');
   const t1 = els['curRate'].title || '';
-  ok(/今日实时/.test(t1) && /涨停 10 家/.test(t1),
-    '① 后的提示含算式：' + (t1.split('\n')[1] || ''));
-  ok(/昨日/.test(t1), '并点明 ① 公式用的是「昨日」基准：' + (t1.split('\n').find(l => /昨日/.test(l)) || '').slice(0, 60));
+  ok(/今日实时 · 非一字板封板率/.test(t1) && /非一字板/.test(t1),
+    '① 后的提示标题：' + (t1.split('\n')[0] || ''));
+  ok(/分母为 0/.test(t1) || /非一字板 0 家/.test(t1),
+    '并解释了为什么这里是 --：' + (t1.split('\n')[1] || ''));
+  ok(/昨日/.test(t1), '点明了 ①② 公式用的是「昨日」基准：' + (t1.split('\n').find(l => /昨日/.test(l)) || '').slice(0, 64));
   ok(/同花顺/.test(t1), '标注了数据源');
   const t2 = els['curRate2'].title || '';
   ok(/非一字板/.test(t2), '② 后的提示讲的是非一字板口径：' + (t2.split('\n')[0]));

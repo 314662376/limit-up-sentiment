@@ -3,8 +3,12 @@
 
   /* ============================================================
    * 两个指数
+   *  ★ 两个公式统一用「昨日非一字板封板率」做权重，不再用「昨日总封板率」。
+   *    理由：一字板买不到，对打板策略没有可实现性；非一字板口径才是这套收益模型的基础。
+   *    （总封板率仍显示在顶部 meta 行，但只作参考，不参与任何计算。）
+   *
    *  ① 涨停情绪指数（无量纲，1.000 = 中性）
-   *     值 = 昨日封板率/100 × (883900涨跌幅% ÷ 100) + 1 + 上证涨跌幅% ÷ 20
+   *     值 = 昨日非一字板封板率/100 × (883900涨跌幅% ÷ 100) + 1 + 上证涨跌幅% ÷ 20
    *     Excel 式 =C3/100*D3+1+E3/20          → y 轴固定 0.925 ~ 1.075
    *                                             （跌破 0.95 的线段标红、涨破 1.05 的标绿）
    *
@@ -158,12 +162,17 @@
     return n;
   }
 
-  // 指数①：涨跌幅以「小数」代入
+  /* 指数①：涨跌幅以「小数」代入。
+   * ratePct 传的是【昨日非一字板封板率】（不是总封板率）——与②保持同一口径。
+   * 注意：有些存档 / 回退路径下的 rate 对象可能没有 fbl（例如当日全是一字板时算不出来），
+   * 这时①会返回 null，调用方需自行兜底显示 --。 */
   function metric(ratePct, aPct, bPct) {
     // 对应 Excel 式 =C3/100*D3+1+E3/20
-    //   C 昨日封板率 → 百分数（47.92）
-    //   D 昨日涨停表现 → 小数（0.0248 即 2.48%）
-    //   E 上证%      → 百分数（0.48 即 +0.48%），不再除以 100
+    //   C 昨日非一字板封板率 → 百分数（47.92）
+    //   D 昨日涨停表现       → 小数（0.0248 即 2.48%）
+    //   E 上证%              → 百分数（0.48 即 +0.48%），不再除以 100
+    if (ratePct == null || !isFinite(ratePct)) return null;
+    if (aPct == null || !isFinite(aPct) || bPct == null || !isFinite(bPct)) return null;
     return (ratePct / 100) * (aPct / 100) + 1 + bPct / 20;
   }
 
@@ -494,33 +503,28 @@
   function clsRate(p) { return p == null ? 'flat' : (p >= 60 ? 'up' : (p <= 40 ? 'down' : 'flat')); }
   function pctOf(v) { return (v == null || !isFinite(v)) ? '--' : v.toFixed(2) + '%'; }
 
-  /* 把「今日实时封板率」贴在 ①② 两个数值后面：①用总封板率、②用非一字板封板率。
+  /* 把「今日实时非一字板封板率」贴在 ①② 两个数值后面。
+   * 全部统一到【非一字板】口径 —— 与 ①② 两个公式的权重口径一致，也和①/②的昨日基准一致。
+   * （今日总封板率不再出现在这里，只在顶部 meta 行留作参考。）
    *
-   * ⚠ 最容易混的一点：**这两个数是「今天」的，而 ①② 公式用的是「昨天」的封板率基准**
-   *   （顶部 meta 行里那两行「昨日封板率…」）。两组数常在同一量级、看着像同一个东西。
-   *   所以这里给鼠标悬停补一份完整算式（title 属性，不占任何可见空间），
-   *   顺便把 ①② 真正用的昨日基准列出来做对照。
+   * ⚠ 唯一要留意的：贴的这两个数是「今天」的，而 ①② 公式用的是「昨天」的基准
+   *   （顶部 meta 行那两行）。两组数常在同一量级、看着像同一个东西，
+   *   所以给鼠标悬停补一份完整算式（title 属性，不占任何可见空间）并列出昨日基准做对照。
    */
-  function rateTip(kind, today, base) {
-    var L = [];
-    if (kind === 'total') {
-      L.push('今日实时 · 总封板率（① 后面这个数）');
-      if (today && today.rate != null) {
-        L.push('= 涨停 ' + today.zt + ' 家 ÷ (涨停 ' + today.zt + ' + 炸板 ' + today.zb + ' 家)');
-        L.push('= ' + today.zt + '/' + (today.zt + today.zb) + ' = ' + today.rate.toFixed(2) + '%');
-      } else { L.push('暂未取到今日数据'); }
-      L.push('数据源：同花顺涨停池 / 炸板池（filter=HS,GEM2STAR）');
-      if (base) L.push('—— 对照：① 公式实际用的是「昨日」' + base.date + ' 的 ' + base.rate.toFixed(2) + '%');
+  function rateTip(which, today, base) {
+    var L = ['今日实时 · 非一字板封板率（' + which + ' 后面这个数）'];
+    if (today && today.fbl != null) {
+      L.push('= 非一字板 ' + today.base + ' 家 ÷ (非一字板 ' + today.base + ' + 炸板 ' + today.zb + ' 家)');
+      L.push('= ' + today.base + '/' + (today.base + today.zb) + ' = ' + today.fbl.toFixed(2) + '%');
+      L.push('（非一字板 = 涨停 ' + today.zt + ' − 一字板 ' + today.oneWord + '）');
+    } else if (today) {
+      L.push('当日全是一字板（非一字板 0 家），分母为 0，无法计算');
     } else {
-      L.push('今日实时 · 非一字板封板率（② 后面这个数）');
-      if (today && today.fbl != null) {
-        L.push('= 非一字板 ' + today.base + ' 家 ÷ (非一字板 ' + today.base + ' + 炸板 ' + today.zb + ' 家)');
-        L.push('= ' + today.base + '/' + (today.base + today.zb) + ' = ' + today.fbl.toFixed(2) + '%');
-        L.push('（非一字板 = 涨停 ' + today.zt + ' − 一字板 ' + today.oneWord + '）');
-      } else if (today) {
-        L.push('当日全是一字板（非一字板 0 家），分母为 0，无法计算');
-      } else { L.push('暂未取到今日数据'); }
-      if (base && base.fbl != null) L.push('—— 对照：② 公式实际用的是「昨日」' + base.date + ' 的 ' + base.fbl.toFixed(2) + '%');
+      L.push('暂未取到今日数据');
+    }
+    L.push('数据源：同花顺涨停池 / 炸板池（filter=HS,GEM2STAR）');
+    if (base && base.fbl != null) {
+      L.push('—— 对照：①② 两个公式用的都是「昨日」' + base.date + ' 的非一字板封板率 ' + base.fbl.toFixed(2) + '%');
     }
     L.push('（盘中实时累加，收盘定格为当日终值）');
     return L.join('\n');
@@ -528,9 +532,10 @@
 
   function renderTodayRate(t) {
     var base = state.rate;
+    // ①② 后面挂的都是今日非一字板封板率（同一口径、同一个数）
     var items = [
-      ['curRate', t ? t.rate : null, rateTip('total', t, base)],
-      ['curRate2', t ? t.fbl : null, rateTip('fbl', t, base)]
+      ['curRate', t ? t.fbl : null, rateTip('①', t, base)],
+      ['curRate2', t ? t.fbl : null, rateTip('②', t, base)]
     ];
     for (var i = 0; i < items.length; i++) {
       var e = document.getElementById(items[i][0]);
@@ -701,16 +706,19 @@
     if (lg) lg.innerHTML = '';
 
     if (ratePct == null) {
-      // 基准（昨日封板率）还没取到就不画，避免画出一条无意义的线
+      // 基准（昨日非一字板封板率）还没取到就不画，避免画出一条无意义的线
       c.clear();
-      notices.push('昨日封板率基准尚未取到，曲线暂不可用。');
+      notices.push('昨日非一字板封板率基准尚未取到，曲线暂不可用。');
       return;
     }
 
     var pts = [];
     rows.forEach(function (p) {
       if (p.pct == null || !DAY_TICK_SET[p.t]) return;
-      pts.push({ t: p.t, v: metric(ratePct, p.pct, p.bPct), pct: p.pct, bPct: p.bPct });
+      var v = metric(ratePct, p.pct, p.bPct);
+      // 注意：不能用 !isFinite(v) 判断 —— isFinite(null) 是 true，会把 null 放过去再 .toFixed 崩掉
+      if (v == null || !isFinite(v)) return;
+      pts.push({ t: p.t, v: v, pct: p.pct, bPct: p.bPct });
     });
     // 用 [时刻, 值] 配对：横轴固定为完整一天，数据只铺到当前时刻，右半段自然留白
     var data = pts.map(function (x) { return [x.t, +x.v.toFixed(5)]; });
@@ -777,13 +785,14 @@
     days.forEach(function (day, i) {
       var color = COLORS[i % COLORS.length];
       var mmdd = mmddOf(day.date);
-      var base = (day.rate && day.rate.rate != null) ? day.rate.rate : null;
+      // 与①的公式一致：取当日的前一交易日的【非一字板封板率】作基准（总封板率不再参与计算）
+      var base = (day.rate && day.rate.fbl != null) ? day.rate.fbl : null;
       var baseDate = (day.rate && day.rate.date) ? String(day.rate.date) : '';
       var pts = [];
       (day.points || []).forEach(function (p) {
         if (base == null || p.a == null || !DAY_TICK_SET[p.t]) return;
         var v = metric(base, p.a, p.b);
-        if (!isFinite(v)) return;
+        if (v == null || !isFinite(v)) return;   // isFinite(null) 为 true，必须显式判 null
         allV.push(v);
         pts.push([mmdd + '|' + p.t, +v.toFixed(5)]);
       });
@@ -820,7 +829,8 @@
 
     if (!series.length) {
       c.clear();
-      notices.push('历史数据积累中：暂无任何交易日存档，5 日图将在采集任务跑过之后出现。');
+      notices.push('历史数据积累中：暂无任何交易日存档（或存档里缺「非一字板封板率」这一项），' +
+        '5 日图将在采集任务跑过之后出现。');
       return;
     }
 
@@ -852,7 +862,7 @@
     if (lg) {
       lg.innerHTML = used.map(function (u) {
         return '<span><i style="background:' + u.color + '"></i>' + u.date +
-          '　封板率 ' + (u.base == null ? '--' : u.base.toFixed(2) + '%') +
+          '　非一字板封板率 ' + (u.base == null ? '--' : u.base.toFixed(2) + '%') +
           '（基准 ' + fmtBaseDay(u.baseDate) + '）</span>';
       }).join('');
     }
@@ -1044,13 +1054,14 @@
 
   var HINT_1D = '实时计算，每分钟刷新；横轴固定为完整交易日 09:25–15:00（09:25 为集合竞价撮合点）';
   var HINT_5D = '最近 5 个交易日按顺序连续铺开：横轴跨 5 天，日内仍是分钟粒度；'
-    + '每天取「所属交易日的前一交易日」封板率作基准，日与日之间以竖虚线分隔';
+    + '每天取「所属交易日的前一交易日」非一字板封板率作基准，日与日之间以竖虚线分隔';
 
   function renderAll() {
     var n1 = [], n2 = [];
     var isDay = (VIEW === '1d');
     if (isDay) {
-      drawToday(state.rows, state.rate ? state.rate.rate : null, n1);
+      // ①② 统一用「昨日非一字板封板率」作权重
+      drawToday(state.rows, state.rate ? state.rate.fbl : null, n1);
       drawToday2(state.rows, state.rate ? state.rate.fbl : null, n2);
     } else {
       // chartDays = 仓库存档 + 当天直连（见 refresh）；缺失时退回存档
@@ -1242,11 +1253,14 @@
 
       if (rate) {
         var tag = rate.src === 'live' ? '' : '［存档］';
-        setText('rateText', rate.rate.toFixed(2) + '%（' + rate.zt + '/' + (rate.zt + rate.zb) +
-          '，基准日 ' + rate.date + '）' + tag);
+        // ①② 公式用的是这一行（非一字板口径）
         setText('fblText', rate.fbl == null ? '--' :
           rate.fbl.toFixed(2) + '%（' + rate.base + '/' + (rate.base + rate.zb) +
-          '，剔除一字板 ' + rate.oneWord + ' 家，炸板率 ' + rate.zbl.toFixed(2) + '%）' + tag);
+          '，剔除一字板 ' + rate.oneWord + ' 家，炸板率 ' + (rate.zbl == null ? '--' : rate.zbl.toFixed(2) + '%') + '）' + tag);
+        // 总封板率仅作参考，不参与任何计算
+        setText('rateText', rate.rate == null ? '--' :
+          rate.rate.toFixed(2) + '%（' + rate.zt + '/' + (rate.zt + rate.zb) +
+          '，基准日 ' + rate.date + '）' + tag);
       } else {
         setText('rateText', '未取到');
         setText('fblText', '未取到');
@@ -1262,11 +1276,11 @@
       }
       var last = lastAll || lastAB;
 
-      // 指数①
+      // 指数①（权重 = 昨日非一字板封板率；取不到时显示 --）
       var vEl = document.getElementById('curValue');
       var dEl = document.getElementById('curDelta');
-      if (last && rate && rate.rate != null) {
-        var cur = metric(rate.rate, last.pct, last.bPct);
+      var cur = (last && rate) ? metric(rate.fbl, last.pct, last.bPct) : null;
+      if (cur != null && isFinite(cur)) {
         if (vEl) { vEl.textContent = cur.toFixed(4); vEl.className = 'v ' + cls1(cur); }
         if (dEl) {
           var dev = (cur - 1) * 100;

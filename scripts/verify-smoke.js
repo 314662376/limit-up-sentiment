@@ -218,7 +218,22 @@ function until(cond, ms) {
   ok(/已连接/.test(els['liveText'].textContent), '状态栏 = ' + els['liveText'].textContent);
   ok(/2026-10-13/.test(els['quoteTime'].textContent), '行情日期 = ' + els['quoteTime'].textContent);
   ok(/64\.79%/.test(els['rateText'].textContent) && !/存档/.test(els['rateText'].textContent),
-    '总封板率走的是直连（不是存档）：' + els['rateText'].textContent);
+    '总封板率走的是直连（不是存档，仅作参考）：' + els['rateText'].textContent);
+
+  // ★ 行为断言：① 必须用「昨日非一字板封板率」算，不能再用总封板率。
+  //   做法是用页面自己显示的三个输入量独立复算一遍，不依赖桩数据的内部细节。
+  const pctNum = s => parseFloat(String(s).replace(/[+%,]/g, ''));
+  const aPct = pctNum(els['aText'].textContent);
+  const bPct = pctNum(els['shText'].textContent);
+  const fblBase = parseFloat(els['fblText'].textContent);
+  const totalBase = parseFloat(els['rateText'].textContent);
+  const expectFbl = fblBase / 100 * (aPct / 100) + 1 + bPct / 20;
+  const ifTotal = totalBase / 100 * (aPct / 100) + 1 + bPct / 20;
+  const shown = parseFloat(els['curValue'].textContent);
+  ok(Math.abs(shown - expectFbl) < 5e-5,
+    '① = ' + shown + '，用非一字板封板率 ' + fblBase + '% 复算 = ' + expectFbl.toFixed(4) + ' ✔');
+  ok(Math.abs(expectFbl - ifTotal) > 1e-4,
+    '两个口径结果确实不同（若用总封板率 ' + totalBase + '% 会得 ' + ifTotal.toFixed(4) + '），断言有区分力');
 
   console.log('\n[4] 图表内容非空');
   const keys = Object.keys(drawn);

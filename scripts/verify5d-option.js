@@ -127,8 +127,9 @@ ok(!captured.opt.series[0].markLine.data.some(d => 'xAxis' in d), '1 日图没�
 
 console.log('\n[④ 图例]');
 ok((lgMainSnap.match(/<span>/g) || []).length === N, '① 图例 ' + (lgMainSnap.match(/<span>/g) || []).length + ' 项（5 日图自己的图例）');
-ok(/封板率 64\.79%/.test(lgMainSnap), '① 图例带封板率与基准日：' + lgMainSnap.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160));
+ok(/非一字板封板率 62\.12%/.test(lgMainSnap), '① 图例带「非一字板封板率」与基准日：' + lgMainSnap.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160));
 ok((lg2Snap.match(/<span>/g) || []).length === exp2, '② 图例 ' + (lg2Snap.match(/<span>/g) || []).length + ' 项（缺 c 的那天不出图例）');
+ok(/非一字板封板率/.test(lg2Snap), '② 图例也是非一字板口径');
 ok(!/2026-10-08/.test(lg2Snap), '② 图例确实没有 10-08：' + lg2Snap.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
 
 console.log('\n' + (fail ? '❌ 失败 ' + fail + ' 项' : '✅ 全部通过'));
