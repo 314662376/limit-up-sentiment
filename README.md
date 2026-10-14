@@ -186,8 +186,21 @@ app.js                         JSONP / fetch 取数、两个指数的计算、�
 lib/echarts.min.js             ECharts 5.4.3（本地内置，不依赖 CDN）
 scripts/collect.js             采集器（CI 用；--full / --once / --probe 可手动跑）
 scripts/backfill.js            历史回填脚本（**目前跑不出结果**，见上文 5 日图说明）
+scripts/backfill-self.js       给老归档补 self（纯本地推导，不联网，幂等）
 data/*.json                    历史数据
 .github/workflows/collect.yml  收盘后采集工作流
+```
+
+校验脚本（都在 `scripts/` 下，`node scripts/xxx.js` 直接跑，通过则退出码 0）：
+
+```
+verify-smoke.js      整文件端到端冒烟：在沙箱里跑完整个 app.js
+verify-0925.js       09:25 翻日的时段边界 + 端到端
+verify-archbase.js   归档回退的「基准日」正确性（3 场景 × 独立子进程）
+verify5d.js          5 日图横轴刻度 / 标签 / 日分隔线
+verify5d-option.js   5 日图与 1 日图的最终 setOption 断言
+verify-heartbeat.js  Worker 心跳与标签栏标题
+verify-mobile.js     手机版式（375px 断点、横竖屏重排）
 ```
 
 ---
