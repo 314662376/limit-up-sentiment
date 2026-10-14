@@ -95,6 +95,47 @@
   footer{margin-top:24px;font-size:12px;color:var(--sub);line-height:1.85;}
   footer code{background:#eceef1;padding:1px 5px;border-radius:4px;font-size:11.5px;color:#404650;}
   .err-inline{font-size:12px;color:var(--up);margin-top:10px;}
+
+  /* ==================== 手机端适配 ====================
+   * 只动版式，不碰任何计算逻辑。
+   * 断点 640px：覆盖绝大多数竖屏手机（375 / 390 / 414 宽）。
+   * 图表内部的留白与标签密度由 app.js 的 isNarrow() 一并调，光改 CSS 不够。
+   */
+  @media (max-width:640px){
+    html{-webkit-text-size-adjust:100%;}       /* 防 iOS 横屏时字号被自动放大 */
+    body{-webkit-tap-highlight-color:transparent;}
+    .wrap{padding:14px 12px 32px;}
+    header.top{gap:6px;}
+    header.top h1{font-size:19px;}
+    header.top .sub{font-size:11.5px;}
+
+    .hero{padding:14px 14px 16px;margin:12px 0 12px;gap:16px 0;}
+    .hero .big{min-width:0;width:100%;gap:2px;}
+    /* 42px 主数值 + 相对基准 + 封板率三块横排，在 375px 屏上会挤爆 → 允许折行并缩小字号 */
+    .hero .big .row{flex-wrap:wrap;gap:6px 12px;}
+    .hero .big .v{font-size:33px;letter-spacing:-.3px;}
+    .hero .big .d,.hero .big .r{font-size:12.5px;}
+    .hero .meta{font-size:12px;gap:4px;}
+    /* 公式说明：原样式是左边框 + 430px 定宽 + margin-left:auto，手机上会横向溢出 */
+    .hero .formula{
+      margin-left:0;max-width:none;border-left:0;border-top:1px solid var(--line);
+      padding-left:0;padding-top:11px;font-size:11.5px;line-height:1.75;
+    }
+
+    .statusbar{padding:9px 12px;gap:6px 14px;font-size:12px;margin-bottom:12px;}
+    .viewbar{padding:8px 12px;gap:10px 12px;font-size:12px;margin-bottom:14px;}
+    .tabs button{padding:7px 16px;}            /* 手机上按起来更舒服 */
+
+    .grid{gap:14px;}
+    .card{padding:13px 12px 8px;border-radius:12px;}
+    .card h2{font-size:14px;flex-direction:column;align-items:flex-start;gap:1px;}
+    .chart{height:250px;}
+    .legend{gap:8px 12px;font-size:11.5px;}
+    .hint5d{font-size:11.5px;line-height:1.65;}
+
+    footer{margin-top:18px;font-size:11.5px;line-height:1.8;}
+    footer code{font-size:11px;}
+  }
 </style>
 </head>
 <body>

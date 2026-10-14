@@ -55,6 +55,20 @@
   function fmtPct(v) { var n = num(v); return n === null ? '--' : (n > 0 ? '+' : '') + n.toFixed(2) + '%'; }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
+  /* ---- 窄屏（手机）判定 ----
+   * 只改 CSS 不够：ECharts 的绘图区留白、刻度标签字号、标签密度都是按像素算的，
+   * 在 375px 宽的屏上沿用桌面的 64px 左边距 + 每天 4 个时刻标签会挤成一团。
+   * 每次调用都重新读 innerWidth，所以横竖屏切换后重新渲染就能生效。
+   */
+  function isNarrow() {
+    try { return (window.innerWidth || 1200) < 640; } catch (e) { return false; }
+  }
+  function chartGrid() {
+    return isNarrow()
+      ? { left: 44, right: 10, top: 18, bottom: 26 }
+      : { left: 64, right: 22, top: 24, bottom: 30 };
+  }
+
   /* 交易日的几个关键时刻（北京时间，单位=当日分钟数） */
   var AUCTION_START = 9 * 60 + 15;   // 555  集合竞价开始
   var AUCTION_END = 9 * 60 + 25;     // 565  集合竞价撮合完成 → 开盘价已定，今日行情从这里算起
@@ -96,6 +110,10 @@
    * 所以刻度名统一为 '1008|09:30' 这种「MMDD|HH:MM」，全局唯一。
    * ============================================================ */
   var DAY_LABELS_5D = { '10:30': 1, '13:30': 1, '15:00': 1 };
+  /* 手机上每天 4 个标签 × 5 天 = 20 个，挤在 ~330px 的绘图区里会互相压住，
+   * 所以窄屏只留每天收盘那一个时刻（加上开盘处的日期，每天 2 个 → 共 10 个）。 */
+  var DAY_LABELS_5D_NARROW = { '15:00': 1 };
+  function day5dLabels() { return isNarrow() ? DAY_LABELS_5D_NARROW : DAY_LABELS_5D; }
 
   // '2026-10-08' / '20261008' → '1008'
   function mmddOf(d) {
@@ -128,7 +146,7 @@
     var m = s.slice(0, i), t = s.slice(i + 1);
     // 每天的第一格标日期（现在是 09:25，因为 DAY_TICKS 从集合竞价撮合点起算）
     if (t === '09:25') return { text: dashMMDD(m), date: true };
-    if (DAY_LABELS_5D[t]) return { text: t, date: false };
+    if (day5dLabels()[t]) return { text: t, date: false };
     return null;
   }
 
@@ -586,7 +604,7 @@
       axisLine: { show: false },
       axisTick: { show: false },
       axisLabel: {
-        color: '#9aa1ab', fontSize: 11,
+        color: '#9aa1ab', fontSize: isNarrow() ? 10 : 11,
         formatter: function (v) { return digits ? Number(v).toFixed(digits) : String(Number(v)); }
       },
       splitLine: { lineStyle: { color: '#f1f2f4' } }
@@ -726,9 +744,10 @@
     var few = pts.length < 2;
     c.setOption({
       animation: false,
-      grid: { left: 64, right: 22, top: 24, bottom: 30 },
+      grid: chartGrid(),
       tooltip: {
         trigger: 'axis',
+        confine: true,          // 手机上提示框必须限制在图表内，否则会溢出屏幕
         backgroundColor: 'rgba(255,255,255,.97)',
         borderColor: '#e8eaed',
         textStyle: { color: '#1f2329', fontSize: 12 },
@@ -836,9 +855,10 @@
 
     c.setOption({
       animation: false,
-      grid: { left: 64, right: 22, top: 24, bottom: 30 },
+      grid: chartGrid(),
       tooltip: {
         trigger: 'axis',
+        confine: true,          // 手机上提示框必须限制在图表内，否则会溢出屏幕
         backgroundColor: 'rgba(255,255,255,.97)',
         borderColor: '#e8eaed',
         textStyle: { color: '#1f2329', fontSize: 12 },
@@ -904,9 +924,10 @@
 
     c.setOption({
       animation: false,
-      grid: { left: 64, right: 22, top: 24, bottom: 30 },
+      grid: chartGrid(),
       tooltip: {
         trigger: 'axis',
+        confine: true,          // 手机上提示框必须限制在图表内，否则会溢出屏幕
         backgroundColor: 'rgba(255,255,255,.97)',
         borderColor: '#e8eaed',
         textStyle: { color: '#1f2329', fontSize: 12 },
@@ -1001,9 +1022,10 @@
 
     c.setOption({
       animation: false,
-      grid: { left: 64, right: 22, top: 24, bottom: 30 },
+      grid: chartGrid(),
       tooltip: {
         trigger: 'axis',
+        confine: true,          // 手机上提示框必须限制在图表内，否则会溢出屏幕
         backgroundColor: 'rgba(255,255,255,.97)',
         borderColor: '#e8eaed',
         textStyle: { color: '#1f2329', fontSize: 12 },
@@ -1253,10 +1275,13 @@
 
       if (rate) {
         var tag = rate.src === 'live' ? '' : '［存档］';
-        // ①② 公式用的是这一行（非一字板口径）
+        // ①② 公式用的是这一行（非一字板口径）。
+        // 把「基准日」显式写出来：涨停池接口被限流时会退回存档，那时这个值未必是真正的「昨日」，
+        // 不写日期用户会误以为它就是昨天的数。
         setText('fblText', rate.fbl == null ? '--' :
           rate.fbl.toFixed(2) + '%（' + rate.base + '/' + (rate.base + rate.zb) +
-          '，剔除一字板 ' + rate.oneWord + ' 家，炸板率 ' + (rate.zbl == null ? '--' : rate.zbl.toFixed(2) + '%') + '）' + tag);
+          '，剔除一字板 ' + rate.oneWord + ' 家，炸板率 ' + (rate.zbl == null ? '--' : rate.zbl.toFixed(2) + '%') +
+          '，基准日 ' + rate.date + '）' + tag);
         // 总封板率仅作参考，不参与任何计算
         setText('rateText', rate.rate == null ? '--' :
           rate.rate.toFixed(2) + '%（' + rate.zt + '/' + (rate.zt + rate.zb) +
@@ -1467,6 +1492,19 @@
   bindTabs();
   refresh();
   var stopHeartbeat = startHeartbeat(tick);
+
+  // 手机横竖屏切换 / 桌面拖窗口后要重新排版：
+  // 图表的 grid 留白、刻度字号、5 日图的标签密度都是按 innerWidth 算的，
+  // 只调 resize() 不重画的话标签会一直是切换前那套。防抖 250ms 避免拖动时疯狂重绘。
+  var relayoutTimer = null;
+  window.addEventListener('resize', function () {
+    if (relayoutTimer) clearTimeout(relayoutTimer);
+    relayoutTimer = setTimeout(function () {
+      relayoutTimer = null;
+      for (var k in charts) { if (charts[k]) charts[k].resize(); }
+      renderAll();
+    }, 250);
+  });
 
   // 兜底一：切回前台立刻补一次刷新，不必干等满一个 60 秒周期。
   document.addEventListener('visibilitychange', function () {
