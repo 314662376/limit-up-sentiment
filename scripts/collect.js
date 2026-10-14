@@ -155,30 +155,83 @@ async function getTimeSeries(prefix, code) {
   return { date: String(p.date || ''), pre: pre, map: map, n: Object.keys(map).length };
 }
 
+// 取「某一天自己的家数统计」（该日无数据 → null）。
+// 顺带给出两种封板率口径：
+//   rate = 总封板率        = 涨停 / (涨停 + 炸板)
+//   fbl  = 非一字板封板率  = (涨停 − 一字板) / (涨停 − 一字板 + 炸板)   ← ①② 两个公式统一用这个
+//   zbl  = 炸板率          = 100 − fbl
+async function poolsOn(ymd) {
+  const ztS = await retry(function () { return getPoolStats('zt', ymd); }, 1);
+  if (!ztS || !(ztS.total > 0)) return null;
+  const zbS = (await retry(function () { return getPoolStats('zb', ymd); }, 1)) || { total: 0 };
+  const zt = ztS.total, zb = zbS.total, ow = ztS.oneWord || 0;
+  const base = zt - ow;                 // 非一字板涨停家数
+  const denom0 = zt + zb;               // 总口径
+  const denom1 = base + zb;             // 非一字板口径
+  return {
+    date: String(ymd),
+    zt: zt, zb: zb, oneWord: ow, base: base,
+    rate: denom0 > 0 ? (zt / denom0) * 100 : null,   // 总封板率
+    fbl: denom1 > 0 ? (base / denom1) * 100 : null,  // 非一字板封板率
+    zbl: denom1 > 0 ? (zb / denom1) * 100 : null     // 炸板率（= 100 − 非一字板封板率）
+  };
+}
+
 // 找「最近一个有数据的交易日」的封板率 / 非一字板封板率
+// —— 注意语义：传入 baseYmd（今天），返回的是**它前面**那个交易日的家数。
+//    这个对象就是归档里的 rate 字段，也是页面上 ①② 两个公式的输入基准。
 async function resolveRate(baseYmd) {
   for (let back = 1; back <= 12; back++) {
     const prev = shiftYmd(baseYmd, -back);
     try {
-      const ztS = await retry(function () { return getPoolStats('zt', prev); }, 1);
-      if (ztS && ztS.total > 0) {
-        const zbS = (await retry(function () { return getPoolStats('zb', prev); }, 1)) || { total: 0 };
-        const zt = ztS.total, zb = zbS.total, ow = ztS.oneWord || 0;
-        const base = zt - ow;                 // 非一字板涨停家数
-        const denom0 = zt + zb;               // 总口径（指数①）
-        const denom1 = base + zb;             // 非一字板口径（指数②）
-        return {
-          date: String(prev),
-          zt: zt, zb: zb, oneWord: ow, base: base,
-          rate: denom0 > 0 ? (zt / denom0) * 100 : null,   // 总封板率
-          fbl: denom1 > 0 ? (base / denom1) * 100 : null,  // 非一字板封板率
-          zbl: denom1 > 0 ? (zb / denom1) * 100 : null     // 炸板率（= 100 − 非一字板封板率）
-        };
-      }
+      const r = await poolsOn(prev);
+      if (r) return r;
     } catch (e) { /* 继续往前找 */ }
     await sleep(250);
   }
   return null;
+}
+
+// 取「某一天自己的家数」——归档里的 self 字段。
+//
+// 为什么要存 self：归档 data/<D>.json 的 rate 存的是 D-1 的家数（给 D 当天算公式用），
+// 所以只靠它推理不出 D 自己的家数。而「D+1 这天的正确基准」恰恰就是 D 自己的家数。
+// 盘中如果池子接口挂了，前端就只能退回存档；没有 self 时会退成 D-1 的家数（早一天），
+// 页面上的「昨日非一字板封板率」会静悄悄地错一格。见 app.js 的 resolveRateArchive。
+async function resolveSelf(ymd) {
+  const r = await poolsOn(ymd);
+  return r ? { date: r.date, zt: r.zt, zb: r.zb, oneWord: r.oneWord, base: r.base, rate: r.rate, fbl: r.fbl, zbl: r.zbl } : null;
+}
+
+// self 能否当「当日终值」用的守卫：
+//   盘中跑 --full 时当天池子还在累加，家数是「半截」的，写进去会污染次日的基准；
+//   唯一例外是在回补历史日（那天已经彻底走完了），任何时候取都是终值。
+function selfUsable(ymdNumDay) {
+  return ymdNumDay !== ymdNum(bjNow()) || hmNum(bjNow()) >= 1500;
+}
+function fmtYmd(n) {
+  const s = String(n);
+  return s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8);
+}
+
+// 顺手回填：resolveRate 拿到的 rateInfo 就是「前一个交易日 P 自己的家数」，
+// 而 P 自己的家数正好是 data/<P>.json 该有的 self。零额外请求，纯补历史欠账。
+function backfillSelf(rateInfo) {
+  try {
+    const pStr = fmtYmd(rateInfo.date);
+    const f = path.join(DATA_DIR, pStr + '.json');
+    if (!fs.existsSync(f)) return false;
+    const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+    if (!j || j.date !== pStr) return false;           // 文件名与内容不符，不碰
+    if (j.self && j.self.rate != null) return false;    // 已有，幂等
+    j.self = rateInfo;
+    fs.writeFileSync(f, JSON.stringify(j, null, 1));
+    console.log('[collect] 回填 self → ' + pStr + '.json（' + rateInfo.date +
+      ' 自家家数：涨停 ' + rateInfo.zt + ' / 炸板 ' + rateInfo.zb + '）');
+    return true;
+  } catch (e) {
+    return false;   // 回填是锦上添花，失败不影响主流程
+  }
 }
 
 // 指数① 涨停情绪指数（见 README「公式口径」，三列单位并不统一）
@@ -245,8 +298,19 @@ async function collectFullDay() {
 
   if (!aP.date || !aP.n) throw new Error('883900 分时为空');
   const dataStr = aP.date.slice(0, 4) + '-' + aP.date.slice(4, 6) + '-' + aP.date.slice(6, 8);
-  const rateInfo = await resolveRate(parseInt(aP.date, 10));
+  const dataNum = parseInt(aP.date, 10);
+  const rateInfo = await resolveRate(dataNum);
   if (!rateInfo) throw new Error('未能取得基准日封板率');
+
+  // 顺手把历史欠账补上（rateInfo 就是前一交易日自己的家数）
+  backfillSelf(rateInfo);
+
+  // 今天自己的家数，存成 self —— 这就是「明天」的正确基准。
+  // 若接口是从别的出口（例如 GitHub Actions）跑，这里能拿到；盘中跑则被守卫挡住。
+  let selfInfo = null;
+  if (selfUsable(dataNum)) {
+    try { selfInfo = await resolveSelf(dataNum); } catch (e) { selfInfo = null; }
+  }
 
   const pts = [];
   Object.keys(aP.map).sort().forEach(function (t) {
@@ -262,10 +326,10 @@ async function collectFullDay() {
   });
   if (!pts.length) throw new Error('无可写入的点');
 
-  const store = { date: dataStr, rate: rateInfo, points: pts, source: 'full' };
+  const store = { date: dataStr, rate: rateInfo, self: selfInfo, points: pts, source: 'full' };
   writeStore(dataStr, store);
   fs.writeFileSync(path.join(DATA_DIR, 'latest.json'), JSON.stringify({
-    date: dataStr, rate: rateInfo, updated: new Date().toISOString()
+    date: dataStr, rate: rateInfo, self: selfInfo, updated: new Date().toISOString()
   }, null, 1));
   return store;
 }
@@ -322,6 +386,10 @@ async function main() {
     const store = await collectFullDay();
     console.log('[collect] 全量落盘 ' + store.date + '：' + store.points.length + ' 个点，' +
       '基准日 ' + store.rate.date + '（非一字板封板率 ' + store.rate.fbl.toFixed(2) + '%）');
+    console.log('[collect] 当日 self：' + (store.self
+      ? '涨停 ' + store.self.zt + ' / 炸板 ' + store.self.zb + ' / 一字板 ' + store.self.oneWord +
+        ' → 非一字板封板率 ' + (store.self.fbl == null ? '--' : store.self.fbl.toFixed(2) + '%')
+      : '未写（接口不可用，或盘中跑被守卫挡住）'));
     console.log('[collect] 末点 ' + JSON.stringify(store.points[store.points.length - 1]));
     return;
   }
@@ -336,16 +404,30 @@ async function main() {
     '\n           总封板率 ' + rateInfo.rate.toFixed(2) + '%  |  非一字板封板率 ' +
     rateInfo.fbl.toFixed(2) + '%  炸板率 ' + rateInfo.zbl.toFixed(2) + '%');
 
+  // 顺手把历史欠账补上（rateInfo 就是前一交易日自己的家数）
+  backfillSelf(rateInfo);
+
+  // 今天自己的家数 = 次日公式要用的基准（收盘后才写，盘中会被 selfUsable 挡住）
+  let selfInfo = null;
+  if (selfUsable(todayNum)) {
+    try { selfInfo = await resolveSelf(todayNum); } catch (e) { selfInfo = null; }
+    if (selfInfo) console.log('[collect] 当日家数 self：涨停 ' + selfInfo.zt + ' / 炸板 ' + selfInfo.zb +
+      ' / 一字板 ' + selfInfo.oneWord +
+      ' → 非一字板封板率 ' + (selfInfo.fbl == null ? '--' : selfInfo.fbl.toFixed(2) + '%'));
+  }
+
   // 供前端读取「昨日封板率」（前端不直连 data.10jqka.com.cn，其 CORS 依赖 Referer）
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(path.join(DATA_DIR, 'latest.json'), JSON.stringify({
     date: dateStr,
     rate: rateInfo,
+    self: selfInfo,
     updated: new Date().toISOString()
   }, null, 1));
 
   let store = readStore(dateStr) || { date: dateStr, rate: rateInfo, points: [] };
   store.rate = rateInfo;
+  if (selfInfo) store.self = selfInfo;
   if (!Array.isArray(store.points)) store.points = [];
 
   if (ONCE) {

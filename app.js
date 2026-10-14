@@ -346,6 +346,11 @@
   var POOL_FIELDS = '199112,9001,330323,330324,330325,9002,330329,133971,133970,' +
     '1968584,3475914,9003,9004,3475915,3475916,330326,330327,330328';
   var rateCache = {};
+  // 归档缓存：日期字符串（2026-10-13）→ 归档 JSON（取不到记 null，避免反复 404）
+  var archCache = {};
+  // 归档日期列表（升序，来自 data/index.json），由 loadHistory 填。
+  // resolveRateArchive 靠它找「最近一个已归档的交易日」。
+  var archDates = [];
 
   // 带超时的 fetch：某些网络环境下该域名会「挂住」而不是立刻报错，必须主动掐断，
   // 否则会把整轮刷新拖死。取不到就走存档兜底。
@@ -411,20 +416,56 @@
     }
   }
 
-  async function resolveRateArchive(dateNum) {
-    var ds = fmtDateNum(String(dateNum || ''));
+  // 归档文件的 10 分钟缓存（命中/未命中都缓存）—— 刷新间隔是 60 秒，
+  // 不缓存的话 5 日图每天都要重下 5 份 JSON；缓存太久又会看漏收盘后新落盘的归档。
+  var ARCH_TTL = 10 * 60 * 1000;
+  async function getArchive(ds) {
+    var c = archCache[ds];
+    if (c && (c.d || Date.now() - c.at < ARCH_TTL)) return c.d;
+    var d = null;
     try {
       var r = await fetch('data/' + ds + '.json?_=' + Date.now());
-      if (r.ok) {
-        var d = await r.json();
-        if (d && d.rate && d.rate.rate) return d.rate;
-      }
-    } catch (e) { /* 忽略，走兜底 */ }
+      if (r.ok) d = await r.json();
+    } catch (e) { d = null; }
+    archCache[ds] = { at: Date.now(), d: d };
+    return d;
+  }
+
+  // 「某个已归档交易日 B 自己的家数」——B 收盘定格的那份封板率，
+  // 也就是「B 的下一个交易日」该用的基准。只有 collect.js 落盘时写的 self 有这份数据；
+  // 老归档没有 self，只能退回 B 的 rate（那是 B-1 的家数，会早一天）。
+  async function archiveOwnRate(bStr) {
+    var d = await getArchive(bStr);
+    if (d && d.self && d.self.rate != null) return d.self;
+    if (d && d.rate && d.rate.rate != null) return d.rate;
+    return null;
+  }
+
+  // dateNum = 要用基准的那一天（通常是当天）；基准 = 严格早于它的最近一个已归档交易日的「自家家数」。
+  // 只认 latest.json 是不够的：latest.json 的 rate 已经是「上一个已归档交易日的前一天」——
+  // 那样回退出来的「昨日非一字板封板率」会静悄悄地早一格。
+  async function resolveRateArchive(dateNum) {
+    var ds = fmtDateNum(String(dateNum || ''));
+
+    // 1) 当天自己已有归档（例如收盘后重开页面）：它存的 rate 就是「昨日」基准，直接可用
+    var own = await getArchive(ds);
+    if (own && own.rate && own.rate.rate != null) return own.rate;
+
+    // 2) 往前找最近一个已归档交易日 B（ISO 日期字符串天然可比），用它自己的家数
+    for (var i = archDates.length - 1; i >= 0; i--) {
+      if (archDates[i] >= ds) continue;
+      var r = await archiveOwnRate(archDates[i]);
+      if (r) return r;
+      break;
+    }
+
+    // 3) 最后兜底：latest.json（self 优先）
     try {
       var r2 = await fetch('data/latest.json?_=' + Date.now());
       if (r2.ok) {
         var d2 = await r2.json();
-        if (d2 && d2.rate && d2.rate.rate) return d2.rate;
+        if (d2 && d2.self && d2.self.rate != null) return d2.self;
+        if (d2 && d2.rate && d2.rate.rate != null) return d2.rate;
       }
     } catch (e) { /* 忽略 */ }
     return null;
@@ -569,17 +610,15 @@
     var res = await fetch('data/index.json?_=' + Date.now());
     if (!res.ok) throw new Error('index.json 读取失败');
     var idx = await res.json();
-    var dates = (idx.dates || []).slice(-DAYS_5D);
+    // 全量日期交给 resolveRateArchive 用（它要顺着往前找「最近一个已归档交易日」）
+    archDates = (idx.dates || []).slice();
+    var dates = archDates.slice(-DAYS_5D);
     var out = [];
     for (var i = 0; i < dates.length; i++) {
-      try {
-        var r = await fetch('data/' + dates[i] + '.json?_=' + Date.now());
-        if (r.ok) {
-          var dd = await r.json();
-          // 过滤掉尚无分钟点的空文件（例如刚开盘、当天还没采到数据）
-          if (dd && dd.points && dd.points.length) out.push(dd);
-        }
-      } catch (e) { /* 忽略单日失败 */ }
+      // 走 getArchive 复用缓存，免得 5 日图每分钟把这几份 JSON 重下一遍
+      var dd = await getArchive(dates[i]);
+      // 过滤掉尚无分钟点的空文件（例如刚开盘、当天还没采到数据）
+      if (dd && dd.points && dd.points.length) out.push(dd);
     }
     return out;
   }
@@ -1244,7 +1283,12 @@
           archived = true;
         }
       }
-      if (!rate && days.length) rate = days[days.length - 1].rate;
+      if (!rate && days.length) {
+        // 直连与归档都失败时的最后兜底：用最近一个已归档交易日的「自家家数」。
+        // 优先 self（collect.js 新格式写的），没有才退回 rate（那会早一天，但已是最后的可用值）。
+        var lb = days[days.length - 1];
+        rate = (lb.self && lb.self.rate != null) ? lb.self : lb.rate;
+      }
 
       // ---- 渲染 ----
       state.rows = rows;
