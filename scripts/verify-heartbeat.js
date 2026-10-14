@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
-const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8').split('\n');
+const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8').replace(/\r\n/g, '\n').split('\n');
 
 // A 段：从常量到取数/封板率这一整块（含 ymdOfBJ / fetchTodayRate / loadHistory）
 const aStart = src.findIndex(l => /^\s*var BASE = /.test(l));
@@ -159,7 +159,7 @@ console.log('\n[5] 标签栏标题随指标值更新');
 
 console.log('\n[6] 静态检查：启动段不再用裸 setInterval 跑心跳');
 {
-  const app = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+  const app = fs.readFileSync(path.join(root, 'app.js'), 'utf8').replace(/\r\n/g, '\n');
   ok(!/^\s*setInterval\(tick, 1000\);/m.test(app), '旧的 setInterval(tick, 1000) 已移除');
   ok(/startHeartbeat\(tick\)/.test(app), '启动改为 startHeartbeat(tick)');
   ok(/beforeunload/.test(app), '有 beforeunload 收尾，避免残留 Worker');

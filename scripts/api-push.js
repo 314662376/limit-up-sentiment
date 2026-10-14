@@ -33,7 +33,30 @@ const argv = process.argv.slice(2);
 const dry = argv.indexOf('--dry') >= 0;
 const explicit = argv.filter(a => a !== '--dry');
 
-function sh(cmd) { return execSync(cmd, { encoding: 'utf8' }).trim(); }
+function sh(cmd) { return execSync(cmd, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).trim(); }
+function shBuf(cmd) { return execSync(cmd, { maxBuffer: 32 * 1024 * 1024 }); }   // 返回 Buffer，不 trim
+
+/* 取某个文件「git 会提交的那份字节」。
+ * ⚠ 这是本脚本最容易踩的坑：仓库开了 core.autocrlf=true，
+ *   工作区是 CRLF、而 git 提交时存的是 LF。直接读工作区会把 CRLF 写进远端 blob，
+ *   和本地提交的字节不一致 → 下次 fetch/rebase 报「整文件都改了」而冲突（已经踩过）。
+ *   - 已暂存/已跟踪 → 读**索引**里的 blob（`:path`）。读索引而不是 HEAD，因为
+ *     你可能刚 `git add` 还没 commit；读工作区也不行，会带上 CRLF。
+ *     `git cat-file blob` **必须用 Buffer 不能 trim**，否则文件末尾的换行会被吃掉、blob 哈希对不上。
+ *   - 未跟踪且未暂存（全新文件）→ 只能读工作区，但按 autocrlf 的约定把 CRLF 折成 LF
+ */
+function blobBytes(f) {
+  const q = JSON.stringify(f);
+  try {
+    sh('git ls-files --error-unmatch -- ' + q);          // 未跟踪会抛错 → 走下面的兜底
+    try { return shBuf('git cat-file blob :' + q); }     // 索引（已 add 的内容）
+    catch (e) { return shBuf('git cat-file blob HEAD:' + q); }
+  } catch (e) { /* 未跟踪 */ }
+  const raw = fs.readFileSync(f);
+  const autocrlf = (sh('git config core.autocrlf') || 'false') !== 'false';
+  if (!autocrlf) return raw;
+  return Buffer.from(raw.toString('utf8').replace(/\r\n/g, '\n'), 'utf8');
+}
 
 async function api(method, url, body) {
   const res = await fetch(API + url, {
@@ -69,8 +92,8 @@ function changedFiles() {
   const missing = files.filter(f => !fs.existsSync(f));
   if (missing.length) { console.error('本地缺文件：' + missing.join(', ')); process.exit(1); }
 
-  console.log('待推文件 ' + files.length + ' 个：');
-  files.forEach(f => console.log('  ' + f + '  (' + fs.statSync(f).size + ' 字节)'));
+  console.log('待推文件 ' + files.length + ' 个（括号内是 git 里那份的字节数，不是工作区）：');
+  files.forEach(f => console.log('  ' + f + '  (' + blobBytes(f).length + ' 字节)'));
 
   const ref = await api('GET', `/repos/${OWNER}/${REPO}/git/ref/heads/${BRANCH}`);
   const remoteSha = ref.object.sha;
@@ -88,10 +111,14 @@ function changedFiles() {
 
   const tree = [];
   for (const f of files) {
-    const content = fs.readFileSync(f).toString('base64');
+    // ⚠ 必须从 git 对象库读（HEAD:<path>），不能读工作区文件。
+    //   仓库开了 core.autocrlf=true：工作区是 CRLF，而 git 提交时存的是 LF。
+    //   直接读工作区会把 CRLF 写进远端 blob，和本地提交的字节不一致，
+    //   下次 fetch/rebase 就会因为「整文件都改了」而冲突（踩过）。
+    const content = blobBytes(f).toString('base64');
     const blob = await api('POST', `/repos/${OWNER}/${REPO}/git/blobs`, { content, encoding: 'base64' });
     tree.push({ path: f, mode: '100644', type: 'blob', sha: blob.sha });
-    console.log('  blob ' + f + ' → ' + blob.sha.slice(0, 7));
+    console.log('  blob ' + f + ' → ' + blob.sha.slice(0, 7) + '  (' + blobBytes(f).length + ' 字节)');
   }
 
   const newTree = await api('POST', `/repos/${OWNER}/${REPO}/git/trees`,

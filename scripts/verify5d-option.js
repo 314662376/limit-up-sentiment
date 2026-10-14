@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
-const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8').split('\n');
+const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8').replace(/\r\n/g, '\n').split('\n');
 
 let from = -1, to = -1;
 // 从顶部常量块（var BASE）开始切，把 COLORS / Y_MIN / 阈值色一并带上
@@ -48,9 +48,10 @@ const days = idx.dates.slice(-5).map(d => {
   const j = JSON.parse(fs.readFileSync(path.join(root, 'data', d + '.json'), 'utf8'));
   return { date: j.date, rate: j.rate, points: j.points };
 });
+// 存档里现在已经有 2026-10-13（采集任务写的），模拟的「当天」要用更晚的日期
 days.push({
-  date: '2026-10-13', live: true,
-  rate: { date: '20261012', zt: 46, zb: 25, rate: 64.7887, oneWord: 5, base: 41, fbl: 62.1212, zbl: 37.8788 },
+  date: '2026-10-14', live: true,
+  rate: { date: '20261013', zt: 67, zb: 19, rate: 77.9070, oneWord: 3, base: 64, fbl: 77.1084, zbl: 22.8916 },
   points: sandbox.DAY_TICKS.slice(0, 45).map((t, i) => ({ t: t, a: 1 + i * 0.02, b: -0.2, c: -3 - i * 0.02 }))
 });
 const N = days.length;
@@ -60,7 +61,7 @@ function checkOne(name, opt, yMin, yMax, expSeries) {
   ok(!!opt, 'setOption 被调用');
   ok(opt.xAxis.type === 'category', "xAxis.type = 'category'");
   ok(opt.xAxis.data.length === N * T, '横轴刻度 = ' + opt.xAxis.data.length + '（' + N + ' 天 × ' + T + '）');
-  ok(opt.xAxis.data[0] === '1008|09:25' && opt.xAxis.data[N * T - 1] === '1013|15:00',
+  ok(opt.xAxis.data[0] === '1008|09:25' && opt.xAxis.data[N * T - 1] === '1014|15:00',
     '横轴首=' + opt.xAxis.data[0] + ' 末=' + opt.xAxis.data[N * T - 1]);
   ok(new Set(opt.xAxis.data).size === opt.xAxis.data.length, '刻度名不重复（不重复才不会被折回同一位置）');
 
@@ -75,7 +76,7 @@ function checkOne(name, opt, yMin, yMax, expSeries) {
     const di = days.findIndex(d => sandbox.mmddOf(d.date) === s.name.replace('-', ''));
     if (lo < di * T || hi > di * T + T - 1) outside++;
   });
-  ok(outside === 0, '每条曲线都落在自己那一天的 242 格区间内：' + spans.join('  '));
+  ok(outside === 0, '每条曲线都落在自己那一天的 ' + T + ' 格区间内：' + spans.join('  '));
   ok(opt.series.length === expSeries,
     '系列数 = ' + opt.series.length + '（期望 ' + expSeries + '：有可用点的交易日各一条）');
 

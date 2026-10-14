@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
-const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8').split('\n');
+const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8').replace(/\r\n/g, '\n').split('\n');
 
 // 从 'function pad(' 到 daySepLines5d 结束（第 140 行，1-based）
 let from = -1, to = -1;
@@ -39,8 +39,10 @@ const days = idx.dates.slice(-5).map(d => {
   return { date: j.date, rate: j.rate, points: j.points };
 });
 // 再模拟一个「当天直连」的 day（refresh() 里 push 的那种）
+// 存档里现在已经有 2026-10-13 了（采集任务写的），模拟的「当天」必须用更晚的日期，
+// 否则会出现两段同名刻度，把「每天各占一段」的断言带偏
 days.push({
-  date: '2026-10-13', rate: { date: '20261012', rate: 64.7887, fbl: 62.1212 },
+  date: '2026-10-14', rate: { date: '20261013', rate: 77.9070, fbl: 77.1084 },
   live: true,
   points: sandbox.DAY_TICKS.slice(0, 30).map((t, i) => ({ t, a: 1 + i * 0.01, b: -0.2, c: -3 - i * 0.01 }))
 });
@@ -52,7 +54,7 @@ ok(new Set(ax.ticks).size === ax.ticks.length, '刻度名全局唯一（否则 5
 ok(ax.start.join(',') === days.map((_, i) => i * T).join(','), '每天起始下标 = ' + ax.start.join(','));
 ok(ax.ticks[0] === '1008|09:25' && ax.ticks[T - 1] === '1008|15:00', '第 1 天首末刻度 = ' + ax.ticks[0] + ' … ' + ax.ticks[T - 1]);
 ok(ax.ticks[T] === '1009|09:25', '第 2 天首刻度 = ' + ax.ticks[T] + '（紧接第 1 天收盘，无隔夜空隙）');
-ok(ax.ticks[ax.ticks.length - 1] === '1013|15:00', '末刻度 = ' + ax.ticks[ax.ticks.length - 1]);
+ok(ax.ticks[ax.ticks.length - 1] === '1014|15:00', '末刻度 = ' + ax.ticks[ax.ticks.length - 1]);
 
 console.log('\n[2] 横轴标签');
 const perDay = {};
@@ -65,7 +67,7 @@ ok(sandbox.label5dOf('1008|09:30') === null && sandbox.label5dOf('1008|14:59') =
 
 console.log('\n[3] tooltip 文本');
 ok(sandbox.fmtKey5d('1008|09:30') === '10-08 09:30', "fmtKey5d('1008|09:30') = " + sandbox.fmtKey5d('1008|09:30'));
-ok(sandbox.fmtKey5d('1013|14:03') === '10-13 14:03', "fmtKey5d('1013|14:03') = " + sandbox.fmtKey5d('1013|14:03'));
+ok(sandbox.fmtKey5d('1014|14:03') === '10-14 14:03', "fmtKey5d('1014|14:03') = " + sandbox.fmtKey5d('1014|14:03'));
 
 console.log('\n[4] 日分隔线');
 const sep = sandbox.daySepLines5d(ax.ticks, ax.start);

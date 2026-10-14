@@ -494,15 +494,51 @@
   function clsRate(p) { return p == null ? 'flat' : (p >= 60 ? 'up' : (p <= 40 ? 'down' : 'flat')); }
   function pctOf(v) { return (v == null || !isFinite(v)) ? '--' : v.toFixed(2) + '%'; }
 
-  // 把「今日实时封板率」贴在 ①② 两个数值后面：①用总封板率、②用非一字板封板率
+  /* 把「今日实时封板率」贴在 ①② 两个数值后面：①用总封板率、②用非一字板封板率。
+   *
+   * ⚠ 最容易混的一点：**这两个数是「今天」的，而 ①② 公式用的是「昨天」的封板率基准**
+   *   （顶部 meta 行里那两行「昨日封板率…」）。两组数常在同一量级、看着像同一个东西。
+   *   所以这里给鼠标悬停补一份完整算式（title 属性，不占任何可见空间），
+   *   顺便把 ①② 真正用的昨日基准列出来做对照。
+   */
+  function rateTip(kind, today, base) {
+    var L = [];
+    if (kind === 'total') {
+      L.push('今日实时 · 总封板率（① 后面这个数）');
+      if (today && today.rate != null) {
+        L.push('= 涨停 ' + today.zt + ' 家 ÷ (涨停 ' + today.zt + ' + 炸板 ' + today.zb + ' 家)');
+        L.push('= ' + today.zt + '/' + (today.zt + today.zb) + ' = ' + today.rate.toFixed(2) + '%');
+      } else { L.push('暂未取到今日数据'); }
+      L.push('数据源：同花顺涨停池 / 炸板池（filter=HS,GEM2STAR）');
+      if (base) L.push('—— 对照：① 公式实际用的是「昨日」' + base.date + ' 的 ' + base.rate.toFixed(2) + '%');
+    } else {
+      L.push('今日实时 · 非一字板封板率（② 后面这个数）');
+      if (today && today.fbl != null) {
+        L.push('= 非一字板 ' + today.base + ' 家 ÷ (非一字板 ' + today.base + ' + 炸板 ' + today.zb + ' 家)');
+        L.push('= ' + today.base + '/' + (today.base + today.zb) + ' = ' + today.fbl.toFixed(2) + '%');
+        L.push('（非一字板 = 涨停 ' + today.zt + ' − 一字板 ' + today.oneWord + '）');
+      } else if (today) {
+        L.push('当日全是一字板（非一字板 0 家），分母为 0，无法计算');
+      } else { L.push('暂未取到今日数据'); }
+      if (base && base.fbl != null) L.push('—— 对照：② 公式实际用的是「昨日」' + base.date + ' 的 ' + base.fbl.toFixed(2) + '%');
+    }
+    L.push('（盘中实时累加，收盘定格为当日终值）');
+    return L.join('\n');
+  }
+
   function renderTodayRate(t) {
-    var items = [['curRate', t ? t.rate : null], ['curRate2', t ? t.fbl : null]];
+    var base = state.rate;
+    var items = [
+      ['curRate', t ? t.rate : null, rateTip('total', t, base)],
+      ['curRate2', t ? t.fbl : null, rateTip('fbl', t, base)]
+    ];
     for (var i = 0; i < items.length; i++) {
       var e = document.getElementById(items[i][0]);
       if (!e) continue;
       var v = items[i][1];
       e.textContent = (v == null) ? '--' : ('封板率 ' + v.toFixed(2) + '%');
       e.className = 'r ' + clsRate(v);
+      e.title = items[i][2];
     }
   }
 
