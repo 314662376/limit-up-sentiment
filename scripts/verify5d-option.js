@@ -37,6 +37,7 @@ global.window = { addEventListener: function () {} };
 // charts / left / busy 原本定义在切片之外，这里补上
 const sandbox = new Function('var charts = {}; var left = 60; var busy = false;\n' + slice +
   '\nreturn { draw5d, draw5d2, drawToday, build5dTicks, mmddOf, DAY_TICKS };')();
+const T = sandbox.DAY_TICKS.length;   // 243 = 09:25 + 09:30-11:30 + 13:00-15:00
 
 let fail = 0;
 function ok(c, m) { console.log((c ? '  ✔ ' : '  ✘ ') + m); if (!c) fail++; }
@@ -58,9 +59,9 @@ function checkOne(name, opt, yMin, yMax, expSeries) {
   console.log('\n[' + name + ']');
   ok(!!opt, 'setOption 被调用');
   ok(opt.xAxis.type === 'category', "xAxis.type = 'category'");
-  ok(opt.xAxis.data.length === N * 242, '横轴刻度 = ' + opt.xAxis.data.length + '（' + N + ' 天 × 242）');
-  ok(opt.xAxis.data[0] === '1008|09:30' && opt.xAxis.data[N * 242 - 1] === '1013|15:00',
-    '横轴首=' + opt.xAxis.data[0] + ' 末=' + opt.xAxis.data[N * 242 - 1]);
+  ok(opt.xAxis.data.length === N * T, '横轴刻度 = ' + opt.xAxis.data.length + '（' + N + ' 天 × ' + T + '）');
+  ok(opt.xAxis.data[0] === '1008|09:25' && opt.xAxis.data[N * T - 1] === '1013|15:00',
+    '横轴首=' + opt.xAxis.data[0] + ' 末=' + opt.xAxis.data[N * T - 1]);
   ok(new Set(opt.xAxis.data).size === opt.xAxis.data.length, '刻度名不重复（不重复才不会被折回同一位置）');
 
   // 每天只画在自己那一段里 —— 这是「横轴跨 5 天」的核心证据
@@ -72,7 +73,7 @@ function checkOne(name, opt, yMin, yMax, expSeries) {
     const lo = Math.min.apply(null, idxs), hi = Math.max.apply(null, idxs);
     spans.push(s.name + ':' + lo + '-' + hi);
     const di = days.findIndex(d => sandbox.mmddOf(d.date) === s.name.replace('-', ''));
-    if (lo < di * 242 || hi > di * 242 + 241) outside++;
+    if (lo < di * T || hi > di * T + T - 1) outside++;
   });
   ok(outside === 0, '每条曲线都落在自己那一天的 242 格区间内：' + spans.join('  '));
   ok(opt.series.length === expSeries,
@@ -115,9 +116,9 @@ console.log('\n[③ 1 日图回归（baseXAxis → baseXAxisDay 之后不应有�
 const rows = days[1].points.map(p => ({ t: p.t, pct: p.a, bPct: p.b, cPct: p.c }));
 captured.opt = null;
 sandbox.drawToday(rows, days[1].rate.rate, []);
-ok(captured.opt.xAxis.data.length === 242, '横轴 = ' + captured.opt.xAxis.data.length + ' 个分钟刻度');
-ok(captured.opt.xAxis.data[0] === '09:30' && captured.opt.xAxis.data[241] === '15:00',
-  '横轴首末 = ' + captured.opt.xAxis.data[0] + ' … ' + captured.opt.xAxis.data[241] + '（仍是单日轴，没有日期前缀）');
+ok(captured.opt.xAxis.data.length === T, '横轴 = ' + captured.opt.xAxis.data.length + ' 个刻度');
+ok(captured.opt.xAxis.data[0] === '09:25' && captured.opt.xAxis.data[T - 1] === '15:00',
+  '横轴首末 = ' + captured.opt.xAxis.data[0] + ' … ' + captured.opt.xAxis.data[T - 1] + '（仍是单日轴，没有日期前缀）');
 ok(!!captured.opt.visualMap && captured.opt.visualMap.type === 'piecewise',
   '1 日图仍用 visualMap 分段染色（低于 0.95 标红 / 高于 1.05 标绿）');
 ok(captured.opt.series[0].data.length === rows.length, '数据点 ' + captured.opt.series[0].data.length + ' 个');

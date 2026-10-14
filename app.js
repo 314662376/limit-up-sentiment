@@ -51,10 +51,17 @@
   function fmtPct(v) { var n = num(v); return n === null ? '--' : (n > 0 ? '+' : '') + n.toFixed(2) + '%'; }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
-  // 完整交易日的分钟刻度（09:30-11:30、13:00-15:00，午休不占位）。
+  /* 交易日的几个关键时刻（北京时间，单位=当日分钟数） */
+  var AUCTION_START = 9 * 60 + 15;   // 555  集合竞价开始
+  var AUCTION_END = 9 * 60 + 25;     // 565  集合竞价撮合完成 → 开盘价已定，今日行情从这里算起
+  var OPEN_MIN = 9 * 60 + 30;        // 570  连续竞价开始
+  var CLOSE_MIN = 15 * 60;           // 900  收盘
+
+  // 完整交易日的分钟刻度：09:25（集合竞价撮合点）+ 09:30-11:30 + 13:00-15:00，午休不占位。
   // 两张图的当日分时都用这一整套横轴，盘中不随实时数据向右延长。
+  // 09:25 这个点只有「当天实时」拿得到（见 fetchOpeningRow），存档里没有，所以历史日的首位是空的。
   var DAY_TICKS = (function () {
-    var a = [];
+    var a = ['09:25'];
     function run(h0, m0, h1, m1) {
       for (var c = h0 * 60 + m0, e = h1 * 60 + m1; c <= e; c++) {
         a.push(pad(Math.floor(c / 60)) + ':' + pad(c % 60));
@@ -67,7 +74,8 @@
   var DAY_TICK_SET = {};
   DAY_TICKS.forEach(function (t) { DAY_TICK_SET[t] = 1; });
 
-  // 当日图 x 轴只标这几个时刻，避免 242 个标签挤在一起
+  // 当日图 x 轴只标这几个时刻，避免 243 个标签挤在一起
+  // （09:25 刻意不标：它和 09:30 只差一格，两个标签会压在一起）
   var DAY_LABELS = {
     '09:30': 1, '10:00': 1, '10:30': 1, '11:00': 1,
     '13:00': 1, '13:30': 1, '14:00': 1, '14:30': 1, '15:00': 1
@@ -114,7 +122,8 @@
     var s = String(v), i = s.indexOf('|');
     if (i < 0) return null;
     var m = s.slice(0, i), t = s.slice(i + 1);
-    if (t === '09:30') return { text: dashMMDD(m), date: true };
+    // 每天的第一格标日期（现在是 09:25，因为 DAY_TICKS 从集合竞价撮合点起算）
+    if (t === '09:25') return { text: dashMMDD(m), date: true };
     if (DAY_LABELS_5D[t]) return { text: t, date: false };
     return null;
   }
@@ -180,10 +189,12 @@
     var day = d.getUTCDay();
     if (day === 0 || day === 6) return '周末休市';
     var m = d.getUTCHours() * 60 + d.getUTCMinutes();
-    if (m < 570) return '盘前';
+    if (m < AUCTION_START) return '盘前';
+    if (m < AUCTION_END) return '集合竞价中';
+    if (m < OPEN_MIN) return '集合竞价已结束';
     if (m <= 690) return '盘中 · 早盘';
     if (m < 780) return '午间休市';
-    if (m <= 900) return '盘中 · 午盘';
+    if (m <= CLOSE_MIN) return '盘中 · 午盘';
     return '盘后';
   }
 
@@ -262,6 +273,42 @@
   }
 
   function fmtDateNum(n) { var s = String(n); return s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8); }
+
+  /* ---- 实时快照 realhead：09:25 集合竞价撮合完成后就能拿到当天的开盘价 ----
+   * 为什么需要它：分时接口在 09:30 之前只会返回「上一交易日」的完整分时、却把 date
+   *   标成今天（张冠李戴，和分时接口是同一类行为），所以 09:25–09:30 这段拿不到今天的点。
+   *   realhead 快照没有这个问题，字段实测含义（三个标的都一致）：
+   *     6 = 昨收   7 = 今开   8 = 最高   9 = 最低   10 = 现价   199112 = 涨跌幅%
+   *   09:25 撮合完成后 `10` 就是今日开盘价 —— 实测 09:29 读到的 883900 现价 3856.333，
+   *   与 09:30 分时首点 3856.333 完全一致。
+   * 该接口同样带 Access-Control-Allow-Origin: *，浏览器可直连。
+   */
+  async function fetchRealhead(prefix, code) {
+    var url = BASE + '/v6/realhead/' + prefix + '_' + code + '/defer/last.js';
+    var cb = 'quotebridge_v6_realhead_' + prefix + '_' + code + '_defer_last';
+    var d = await fetchJsonp(url, cb);
+    var it = d && d.items;
+    if (!it) return null;
+    var price = parseFloat(it['10']);
+    var pre = parseFloat(it['6']);
+    if (!isFinite(price) || !isFinite(pre) || pre <= 0 || price <= 0) return null;
+    return { price: price, pre: pre, pct: (price / pre - 1) * 100 };
+  }
+
+  /* ---- 09:25 的开盘读数：把三个标的的实时快照拼成一个「今日首点」 ----
+   * 时刻记 09:25（真的就是这个点，不冒充 09:30），好让「最新记录点」和时间轴都不撒谎。 */
+  async function fetchOpeningRow() {
+    var a = await fetchRealhead('48', '883900');
+    await sleep(130);
+    var b = null;
+    try { b = await fetchRealhead('hs', '1A0001'); } catch (e) { b = null; }
+    await sleep(130);
+    var c = null;
+    try { c = await fetchRealhead('48', '883918'); } catch (e) { c = null; }
+    // ① 的两个输入缺一不可；883918 拿不到就把指数②置空（与盘中逻辑一致）
+    if (!a || !b) return null;
+    return { t: '09:25', pct: a.pct, bPct: b.pct, cPct: (c ? c.pct : null) };
+  }
 
   /* ---- 「昨日封板率」基准 ----
    * 首选：直连同花顺涨停池 / 炸板池自己算（实测该接口会把请求的 Origin 原样回显
@@ -417,10 +464,17 @@
   }
 
   async function fetchTodayRate() {
-    var today = ymdOfBJ(bjNow());
+    // 注意：ymdOfBJ 返回的是「数字」日期（20261013），不是 Date —— 要拿时分/星期得用 bjNow()
+    var nowBJ = bjNow();
+    var today = ymdOfBJ(nowBJ);
     // 当日实时数据 55 秒过期（刷新间隔 60 秒）；
     // 回退数据 5 分钟过期——盘前 / 非交易日它本来就不会变，没必要每分钟重问一遍。
-    var ttl = todayRateCache.fallback ? 5 * 60 * 1000 : 55000;
+    // 例外：09:00–09:35 这段把回退缓存压到 20 秒。因为当天第一笔数据正好落在
+    // 09:25（集合竞价撮合），若沿用 5 分钟缓存，页面可能拖到 09:29 才翻成今天。
+    var mins = nowBJ.getUTCHours() * 60 + nowBJ.getUTCMinutes();
+    var dW = nowBJ.getUTCDay();
+    var nearOpen = (dW >= 1 && dW <= 5) && mins >= 9 * 60 && mins <= 9 * 60 + 35;
+    var ttl = todayRateCache.fallback ? (nearOpen ? 20000 : 5 * 60 * 1000) : 55000;
     if (todayRateCache.val && Date.now() - todayRateCache.at < ttl) return todayRateCache.val;
 
     var r = await fetchRateOn(today);
@@ -624,6 +678,8 @@
     });
     // 用 [时刻, 值] 配对：横轴固定为完整一天，数据只铺到当前时刻，右半段自然留白
     var data = pts.map(function (x) { return [x.t, +x.v.toFixed(5)]; });
+    // 09:25–09:30 只有「开盘读数」这一个点，连线画不出来 → 至少把点标出来，别让图看着是空的
+    var few = pts.length < 2;
     c.setOption({
       animation: false,
       grid: { left: 64, right: 22, top: 24, bottom: 30 },
@@ -647,7 +703,9 @@
       yAxis: baseYAxis(Y_MIN, Y_MAX, Y_STEP, 3),
       visualMap: zoneVisualMap(1, TH1_LO, TH1_HI, '#2f6bd8'),
       series: [{
-        type: 'line', data: data, symbol: 'none', smooth: false,
+        type: 'line', data: data,
+        symbol: few ? 'circle' : 'none', symbolSize: few ? 6 : 0, showSymbol: few,
+        smooth: false,
         // 注意：这里不能写死 lineStyle.color，否则会盖掉 visualMap 的分段染色
         lineStyle: { width: 1.7 },
         areaStyle: areaFill('47,107,216'),
@@ -796,6 +854,7 @@
       pts.push({ t: p.t, v: v, pct: p.pct, cPct: p.cPct });
     });
     var data = pts.map(function (x) { return [x.t, +x.v.toFixed(2)]; });
+    var few2 = pts.length < 2;      // 同上：开盘点只有一个时也要看得见
 
     c.setOption({
       animation: false,
@@ -820,7 +879,9 @@
       yAxis: baseYAxis(Y2_MIN, Y2_MAX, Y2_STEP, 0),
       visualMap: zoneVisualMap(1, TH2_LO, TH2_HI, '#e08a1e'),
       series: [{
-        type: 'line', data: data, symbol: 'none', smooth: false,
+        type: 'line', data: data,
+        symbol: few2 ? 'circle' : 'none', symbolSize: few2 ? 6 : 0, showSymbol: few2,
+        smooth: false,
         // 同上：颜色交给 visualMap 分段决定
         lineStyle: { width: 1.7 },
         areaStyle: areaFill('224,138,30'),
@@ -945,7 +1006,7 @@
   })();
   var state = { rows: [], rate: null, days: [] };
 
-  var HINT_1D = '实时计算，每分钟刷新；横轴固定为完整交易日 09:30–15:00';
+  var HINT_1D = '实时计算，每分钟刷新；横轴固定为完整交易日 09:25–15:00（09:25 为集合竞价撮合点）';
   var HINT_5D = '最近 5 个交易日按顺序连续铺开：横轴跨 5 天，日内仍是分钟粒度；'
     + '每天取「所属交易日的前一交易日」封板率作基准，日与日之间以竖虚线分隔';
 
@@ -996,11 +1057,23 @@
   }
 
   /* ==================== 主流程 ==================== */
+  // 是否在交易日里、且已经过了某个时刻（now 是 bjNow() 的产物，读 UTC 字段即北京时间）
+  function isWeekday(d) { var w = d.getUTCDay(); return w >= 1 && w <= 5; }
+  function minsOf(d) { return d.getUTCHours() * 60 + d.getUTCMinutes(); }
+
+  // 连续竞价时段：09:30 – 15:00
   function inSession(now) {
-    var day = now.getUTCDay();
-    if (day === 0 || day === 6) return false;
-    var m = now.getUTCHours() * 60 + now.getUTCMinutes();
-    return m >= 570 && m <= 900;   // 北京时间 09:30 - 15:00
+    if (!isWeekday(now)) return false;
+    var m = minsOf(now);
+    return m >= OPEN_MIN && m <= CLOSE_MIN;
+  }
+
+  // 今日行情是否已开始：09:25 集合竞价撮合完成（开盘价已定）即算开始。
+  // 这是本次改动的主开关——用户要求页面在 09:25 而不是 09:30 翻到新交易日。
+  function todayStarted(now) {
+    if (!isWeekday(now)) return false;
+    var m = minsOf(now);
+    return m >= AUCTION_END && m <= CLOSE_MIN;
   }
 
   async function refresh() {
@@ -1060,6 +1133,32 @@
         }
       } catch (e) {
         rows = [];
+      }
+
+      // ---- 今日封板率 ----
+      // 顺手把它提到前面来：09:25–09:30 这段要靠「今日池子有没有家数」来判断
+      // 今天到底开没开盘（非交易日/节假日查当日池子恒为 0 家），
+      // 免得给休市日凭空造出一个开盘点。
+      var todayLive = null;
+      try { todayLive = await fetchTodayRate(); } catch (e) { todayLive = null; }
+      var todayIsLive = !!(todayRateCache.val && !todayRateCache.fallback);
+
+      // ---- 09:25–09:30 的空档：分时接口此时还只有「昨天」的数据（已被上面的判据丢弃），
+      //      改用 realhead 快照补一个今日开盘点。这就是用户要的「9:25 就更新页面」。 ----
+      // 严格限定在开盘前：09:30 之后 realhead 的现价已经会变，再标成 09:25 就是假时间了；
+      // 那时的接口偶发失败仍按老规矩退回存档兜底。
+      var usedOpening = false;
+      // 今日已开始（09:25 撮合完成）但还没到 09:30 → 分时此刻必然只有昨天那份
+      var inOpenGap = todayStarted(now) && minsOf(now) < OPEN_MIN;
+      if (!rows.length && todayIsLive && inOpenGap) {
+        try {
+          var oRow = await fetchOpeningRow();
+          if (oRow) {
+            rows = [oRow];
+            dataDate = String(ymdOfBJ(now));
+            usedOpening = true;
+          }
+        } catch (e) { /* 拿不到就继续往下走存档兜底 */ }
       }
 
       if (rows.length) rate = await resolveRate(dataDate);
@@ -1167,9 +1266,7 @@
         setText('lastPoint', last.t + (lastAll && lastAll.t !== last.t ? '（883918 到 ' + lastAll.t + '）' : ''));
       }
 
-      // 今日实时封板率：贴在 ①② 数值后面（独立于公式，取不到就显示 --）
-      var todayLive = null;
-      try { todayLive = await fetchTodayRate(); } catch (e) { todayLive = null; }
+      // 今日实时封板率：贴在 ①② 数值后面（已在上面取过，这里只负责渲染）
       renderTodayRate(todayLive);
 
       // 按当前选中的视图（1日 / 5日）绘制两张图
@@ -1180,21 +1277,41 @@
       }
 
       if (dot) dot.className = 'dot on';
-      // 三种状态分开说：盘中（当天数据在跑）/ 盘前（当天还没有数据，显示上一交易日）/ 盘后（当天已收盘，分时是完整的）
-      var dW = now.getUTCDay();
-      var minsNow = now.getUTCHours() * 60 + now.getUTCMinutes();
-      var isPre = (dW >= 1 && dW <= 5) && minsNow < 570;
+      /* 五种状态分开说，别让用户自己猜：
+       *   盘中     —— 当天分时在跑
+       *   集合竞价已结束（09:25–09:30）—— 今日行情已开始，靠 realhead 给的开盘读数
+       *   盘前 / 集合竞价中 —— 今天还没出数据，显示上一交易日
+       *   盘后     —— 当天已收盘，分时是完整的 */
+      var minsNow = minsOf(now);
+      var inAucDone = isWeekday(now) && minsNow >= AUCTION_END && minsNow < OPEN_MIN;
+      var isPre = isWeekday(now) && minsNow < AUCTION_START;
+      var isAuction = isWeekday(now) && minsNow >= AUCTION_START && minsNow < AUCTION_END;
+
+      var stateTxt;
+      if (inSession(now)) {
+        stateTxt = '已连接 · 盘中实时刷新';
+      } else if (inAucDone) {
+        stateTxt = usedOpening
+          ? '已连接 · 集合竞价已结束，显示开盘读数（分时从 09:30 起逐分钟更新）'
+          : '已连接 · 集合竞价已结束，等待开盘读数';
+      } else if (isAuction) {
+        stateTxt = '已连接 · 集合竞价进行中，暂显示上一交易日';
+      } else if (isPre) {
+        stateTxt = '已连接 · 盘前，显示上一交易日';
+      } else {
+        stateTxt = '已连接 · 已收盘（当日完整分时）';
+      }
 
       // 数据末点比当前时间落后 3 分钟以上 → 直接写明「数据停在几点」，
       // 免得页面看着在刷新、其实曲线没动（浏览器缓存 / 网络中间层都会造成）。
+      // 09:25–09:30 只一个开盘点，谈不上「停留」，跳过。
       var staleTxt = '';
-      if (last && inSession(now)) {
+      if (last && inSession(now) && !usedOpening) {
         var lm = parseInt(last.t.slice(0, 2), 10) * 60 + parseInt(last.t.slice(3, 5), 10);
         if (isFinite(lm) && minsNow - lm >= 3) staleTxt = '　⚠ 数据停在 ' + last.t;
       }
 
-      setText('liveText', (inSession(now) ? '已连接 · 盘中实时刷新'
-        : (isPre ? '已连接 · 盘前，显示上一交易日' : '已连接 · 已收盘（当日完整分时）')) +
+      setText('liveText', stateTxt +
         (archived ? '　[暂用最近交易日存档]' : '') + staleTxt);
 
     } catch (e) {
@@ -1259,11 +1376,26 @@
     };
   }
 
+  /* ---- 关键时刻到点强制刷新 ----
+   * 心跳周期是 60 秒，若不干预，「09:25 翻成今天」可能拖到 09:25:59 才生效。
+   * 09:25（集合竞价撮合）与 09:30（连续竞价开始）这两个点必须准，到点就把倒计时清零。 */
+  var lastForcedKey = '';
+  function forceAtMilestone(now) {
+    var m = minsOf(now);
+    // 09:25 撮合、09:30 开盘、09:31（分时首点此刻必定已到位，补一发确保曲线接上）
+    if (m !== AUCTION_END && m !== OPEN_MIN && m !== OPEN_MIN + 1) return;
+    var key = ymdOfBJ(now) + '@' + m;
+    if (key === lastForcedKey) return;
+    lastForcedKey = key;
+    left = 0;
+  }
+
   /* ---- 每秒心跳：走本地时钟 + 倒计时 ---- */
   var lastBeatAt = 0;
   function tick() {
     var now = bjNow();
     setText('localTime', hmOf(now) + ':' + pad(now.getUTCSeconds()) + ' · ' + phaseText(now));
+    forceAtMilestone(now);
 
     // 按「真实经过的秒数」递减，而不是无脑 -1：
     // 标签被冻结、电脑睡眠、或者心跳本身被拖慢时，回来会一次性补齐，

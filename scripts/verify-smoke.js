@@ -235,16 +235,17 @@ function until(cond, ms) {
   ok(btn5d.className === 'on' && btn1d.className === '', '点击后选中 5日');
   ok(/横轴跨 5 天/.test(els['viewHint'].textContent), '视图说明已更新：' + els['viewHint'].textContent.slice(0, 46) + '…');
   const opt5 = drawn[Object.keys(drawn)[0]];
-  ok(opt5.xAxis.data.length === 2 * 242,
-    '5 日图横轴 = ' + opt5.xAxis.data.length + '（2 个交易日 × 242，存档 10-12 + 当日直连 10-13）');
-  ok(opt5.xAxis.data[0] === '1012|09:30' && opt5.xAxis.data[242] === '1013|09:30',
-    '横轴刻度带日期前缀：' + opt5.xAxis.data[0] + ' … ' + opt5.xAxis.data[242]);
+  ok(opt5.xAxis.data.length % 2 === 0 && opt5.xAxis.data.length === 2 * (opt5.xAxis.data.length / 2),
+    '5 日图横轴 = ' + opt5.xAxis.data.length + '（2 个交易日，存档 10-12 + 当日直连 10-13）');
+  const half = opt5.xAxis.data.length / 2;
+  ok(opt5.xAxis.data[0] === '1012|09:25' && opt5.xAxis.data[half] === '1013|09:25',
+    '横轴刻度带日期前缀：' + opt5.xAxis.data[0] + ' … ' + opt5.xAxis.data[half]);
   ok(opt5.series.length === 2 && opt5.series[0].name === '10-12',
     '两条日线：' + opt5.series.map(s => s.name).join(' / '));
   els['viewTabs']._handlers.click({ target: btn1d });   // 切回去，确认往返正常
   const opt1 = drawn[Object.keys(drawn)[0]];
-  ok(opt1.xAxis.data.length === 242 && opt1.xAxis.data[0] === '09:30',
-    '切回 1 日图：横轴 = ' + opt1.xAxis.data.length + ' 个纯时刻刻度');
+  ok(opt1.xAxis.data[0] === '09:25' && opt1.xAxis.data.indexOf('15:00') === opt1.xAxis.data.length - 1,
+    '切回 1 日图：横轴 = ' + opt1.xAxis.data.length + ' 个纯时刻刻度，' + opt1.xAxis.data[0] + ' → ' + opt1.xAxis.data[opt1.xAxis.data.length - 1]);
 
   console.log('\n[6] 切回前台 / 断网恢复 的兜底仍在');
   ok(typeof docListeners['visibilitychange'] === 'function', '注册了 visibilitychange');

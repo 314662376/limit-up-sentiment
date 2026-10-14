@@ -9,11 +9,11 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8').split('\n');
 
-// A 段：工具函数（pad / setText / bjNow / hmOf / phaseText …）
+// A 段：从常量到取数/封板率这一整块（含 ymdOfBJ / fetchTodayRate / loadHistory）
 const aStart = src.findIndex(l => /^\s*var BASE = /.test(l));
-const aEnd = src.findIndex(l => /「昨日封板率」基准/.test(l)) - 1;
-// B 段：本次新增的标题 + 心跳 + tick
-const bStart = src.findIndex(l => /标签页标题显示实时指标/.test(l));
+const aEnd = src.findIndex(l => /==================== 图表公共部件/.test(l)) - 1;
+// B 段：主流程（isWeekday / minsOf / inSession / todayStarted）+ 标题 + 心跳 + tick
+const bStart = src.findIndex(l => /==================== 主流程/.test(l));
 const tickAt = src.findIndex(l => /^\s*function tick\(\)/.test(l));
 let bEnd = -1;
 for (let i = tickAt + 1; i < src.length; i++) { if (src[i] === '  }') { bEnd = i; break; } }

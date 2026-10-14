@@ -29,7 +29,8 @@ let fail = 0;
 function ok(cond, msg) { console.log((cond ? '  ✔ ' : '  ✘ ') + msg); if (!cond) fail++; }
 
 console.log('切片行号:', from + 1, '~', to + 1);
-console.log('DAY_TICKS =', sandbox.DAY_TICKS.length, '首', sandbox.DAY_TICKS[0], '第122个', sandbox.DAY_TICKS[121], '末', sandbox.DAY_TICKS[241]);
+const T = sandbox.DAY_TICKS.length;
+console.log('DAY_TICKS =', T, '首', sandbox.DAY_TICKS[0], '次', sandbox.DAY_TICKS[1], '末', sandbox.DAY_TICKS[T - 1]);
 
 // 用仓库里真实的存档来构造 days
 const idx = JSON.parse(fs.readFileSync(path.join(root, 'data/index.json'), 'utf8'));
@@ -46,11 +47,11 @@ days.push({
 
 console.log('\n[1] 横轴刻度');
 const ax = sandbox.build5dTicks(days);
-ok(ax.ticks.length === days.length * 242, '刻度总数 = ' + ax.ticks.length + '（= ' + days.length + ' 天 × 242）');
+ok(ax.ticks.length === days.length * T, '刻度总数 = ' + ax.ticks.length + '（= ' + days.length + ' 天 × ' + T + '）');
 ok(new Set(ax.ticks).size === ax.ticks.length, '刻度名全局唯一（否则 5 天会叠回同一个 x 位置）');
-ok(ax.start.join(',') === days.map((_, i) => i * 242).join(','), '每天起始下标 = ' + ax.start.join(','));
-ok(ax.ticks[0] === '1008|09:30' && ax.ticks[241] === '1008|15:00', '第 1 天首末刻度 = ' + ax.ticks[0] + ' … ' + ax.ticks[241]);
-ok(ax.ticks[242] === '1009|09:30', '第 2 天首刻度 = ' + ax.ticks[242] + '（紧接第 1 天收盘，无隔夜空隙）');
+ok(ax.start.join(',') === days.map((_, i) => i * T).join(','), '每天起始下标 = ' + ax.start.join(','));
+ok(ax.ticks[0] === '1008|09:25' && ax.ticks[T - 1] === '1008|15:00', '第 1 天首末刻度 = ' + ax.ticks[0] + ' … ' + ax.ticks[T - 1]);
+ok(ax.ticks[T] === '1009|09:25', '第 2 天首刻度 = ' + ax.ticks[T] + '（紧接第 1 天收盘，无隔夜空隙）');
 ok(ax.ticks[ax.ticks.length - 1] === '1013|15:00', '末刻度 = ' + ax.ticks[ax.ticks.length - 1]);
 
 console.log('\n[2] 横轴标签');
@@ -60,7 +61,7 @@ const dayKeys = Object.keys(perDay);
 ok(dayKeys.length === days.length, '每天都产生了标签，共 ' + dayKeys.length + ' 天');
 ok(dayKeys.every(k => perDay[k].length === 4), '每天 4 个标签（日期 + 10:30/13:30/15:00），实测 ' + dayKeys.map(k => perDay[k].length).join('/'));
 ok(perDay[dayKeys[0]].join(' ') === '10-08(日期) 10:30 13:30 15:00', '第 1 天标签 = ' + perDay[dayKeys[0]].join(' '));
-ok(sandbox.label5dOf('1008|09:31') === null && sandbox.label5dOf('1008|14:59') === null, '非标注刻度返回 null（不渲染标签）');
+ok(sandbox.label5dOf('1008|09:30') === null && sandbox.label5dOf('1008|14:59') === null, '非标注刻度返回 null（不渲染标签）');
 
 console.log('\n[3] tooltip 文本');
 ok(sandbox.fmtKey5d('1008|09:30') === '10-08 09:30', "fmtKey5d('1008|09:30') = " + sandbox.fmtKey5d('1008|09:30'));
@@ -70,7 +71,7 @@ console.log('\n[4] 日分隔线');
 const sep = sandbox.daySepLines5d(ax.ticks, ax.start);
 ok(sep.length === days.length - 1, '分隔线 ' + sep.length + ' 条（5 天之间 4 条）');
 ok(sep.every(s => ax.ticks.indexOf(s.xAxis) >= 0), '每条分隔线都落在真实存在的刻度上（markLine 按类别名匹配，名字错就画不出来）');
-ok(sep.map(s => s.xAxis).join(' ') === days.slice(1).map(d => sandbox.mmddOf(d.date) + '|09:30').join(' '),
+ok(sep.map(s => s.xAxis).join(' ') === days.slice(1).map(d => sandbox.mmddOf(d.date) + '|09:25').join(' '),
   '分隔线位置 = ' + sep.map(s => s.xAxis).join(' '));
 
 console.log('\n[5] 数据点能否落到横轴上（落不上会被 ECharts 静默丢弃）');
@@ -85,8 +86,8 @@ days.forEach(d => d.points.forEach(p => { if (!sandbox.DAY_TICK_SET[p.t]) badTic
 ok(badTick === 0, '不在 09:30–15:00 分钟刻度里的点：' + badTick + ' 个');
 
 console.log('\n[6] 与 1 日图不串味');
-ok(sandbox.build5dTicks([days[0]]).ticks.length === 242 && sandbox.build5dTicks([days[0]]).ticks[0] === '1008|09:30',
-  '只剩 1 天时横轴退化为该日 242 个刻度，不报错');
+ok(sandbox.build5dTicks([days[0]]).ticks.length === T && sandbox.build5dTicks([days[0]]).ticks[0] === '1008|09:25',
+  '只剩 1 天时横轴退化为该日 ' + T + ' 个刻度，不报错');
 
 console.log('\n' + (fail ? '❌ 失败 ' + fail + ' 项' : '✅ 全部通过'));
 process.exit(fail ? 1 : 0);
